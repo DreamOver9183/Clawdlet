@@ -25,6 +25,8 @@ class PetState(str, Enum):
     BLOB = "idle_blob"
     WANDER = "walk_horizontal"
     TYPING = "typing_laptop"
+    PUT_AWAY_LAPTOP = "put_away_laptop"
+    KICK_LAPTOP = "kick_laptop"
     CLIMB = "climb_vertical"
     PERCH_CLAUDE = "perch_look_down"
     DRAGGED = "dragged_struggle"
@@ -54,6 +56,16 @@ class WindowSnapshot:
 
 
 @dataclass(frozen=True)
+class ProjectileRenderState:
+    """Output state for the kicked laptop flying across the screen to the monitor edge."""
+
+    x: int
+    y: int
+    animation_name: str
+    elapsed_s: float
+
+
+@dataclass(frozen=True)
 class RenderFrameState:
     """Output snapshot consumed by the transparent overlay GUI each frame."""
 
@@ -68,6 +80,7 @@ class RenderFrameState:
     vy: float = 0.0
     locked_hwnd: int | None = None
     window_speed: float = 0.0
+    projectile: ProjectileRenderState | None = None
 
 
 class ClawdletController:
@@ -75,6 +88,8 @@ class ClawdletController:
 
     SQUISH_DURATION_S: float = 0.20
     DIZZY_DURATION_S: float = 1.80
+    PUT_AWAY_DURATION_S: float = 1.10
+    KICK_LAPTOP_DURATION_S: float = 1.28
     POINTER_HISTORY_WINDOW_S: float = 0.10
 
     def __init__(
@@ -117,6 +132,16 @@ class ClawdletController:
         self._drag_anchor_offset: Vec2 = Vec2(0.0, 0.0)
         self._pointer_history: deque[tuple[float, float, float]] = deque()
         self._clock: float = 0.0
+
+        # Kicked laptop cross-screen projectile state (Hyper mode)
+        self._proj_spawn_pending: bool = False
+        self._proj_active: bool = False
+        self._proj_phase: str = "flying"  # "flying" | "wall_hit"
+        self._proj_x: float = 0.0
+        self._proj_y: float = 0.0
+        self._proj_vx: float = 0.0
+        self._proj_vy: float = 0.0
+        self._proj_elapsed_s: float = 0.0
 
     @property
     def profile(self) -> ActivityProfile:
@@ -194,8 +219,61 @@ class ClawdletController:
         self._detach_to_fall()
         self.body.vy = jump_vy
 
+    def _start_stop_typing(self) -> None:
+        """Transition from TYPING into the mode-appropriate laptop put-away animation."""
+        self.manual_typing = False
+        self.body.vx = 0.0
+        if self.activity_mode == ActivityMode.HYPER:
+            self.state = PetState.KICK_LAPTOP
+            self._decision_duration = self.KICK_LAPTOP_DURATION_S
+            self._proj_spawn_pending = True
+        else:
+            self.state = PetState.PUT_AWAY_LAPTOP
+            self._decision_duration = self.PUT_AWAY_DURATION_S
+            self._proj_spawn_pending = False
+        self._state_timer = 0.0
+
+    def _tick_projectile(self, dt: float) -> None:
+        """Advance the kicked laptop flying across the screen into the left monitor edge."""
+        if self._proj_spawn_pending:
+            if self.state != PetState.KICK_LAPTOP:
+                self._proj_spawn_pending = False
+            elif self._state_timer >= 0.18:
+                # Frame 1 of kick_laptop: launch the projectile from Clawd's front-left foot!
+                self._proj_spawn_pending = False
+                self._proj_active = True
+                self._proj_phase = "flying"
+                self._proj_elapsed_s = 0.0
+                self._proj_x = max(self.work_area.left, self.body.x - self.body.width * 0.25)
+                self._proj_y = self.body.y + self.body.height * 0.10
+                dist_to_left = max(40.0, self._proj_x - self.work_area.left)
+                self._proj_vx = -max(1850.0, dist_to_left / 0.34)
+                self._proj_vy = -240.0
+                return
+
+        if not self._proj_active:
+            return
+
+        self._proj_elapsed_s += dt
+        if self._proj_phase == "flying":
+            self._proj_x += self._proj_vx * dt
+            self._proj_y += self._proj_vy * dt
+            self._proj_vy += 650.0 * dt
+            self._proj_y = max(
+                self.work_area.top,
+                min(self.work_area.bottom - self.body.height, self._proj_y),
+            )
+            if self._proj_x <= self.work_area.left:
+                self._proj_x = self.work_area.left
+                self._proj_phase = "wall_hit"
+                self._proj_elapsed_s = 0.0
+        else:
+            # 14 frames at 8.0 FPS = 1.75s rich explosion duration
+            if self._proj_elapsed_s >= 1.78:
+                self._proj_active = False
+
     def toggle_typing(self) -> bool:
-        """Toggle manual laptop-typing mode when grounded or perched (plays for ~6s then resumes)."""
+        """Toggle manual laptop-typing mode when grounded or perched (plays for ~6s then puts away)."""
         self.manual_typing = not self.manual_typing
         if self.manual_typing and self.body.grounded:
             self.body.vx = 0.0
@@ -203,10 +281,7 @@ class ClawdletController:
             self._state_timer = 0.0
             self._decision_duration = 6.0
         elif not self.manual_typing and self.state == PetState.TYPING:
-            self.state = (
-                PetState.PERCH_CLAUDE if self._perched_hwnd is not None else PetState.IDLE
-            )
-            self._state_timer = 0.0
+            self._start_stop_typing()
         return self.manual_typing
 
     def begin_drag(self, cursor_x: float, cursor_y: float) -> None:
@@ -529,7 +604,10 @@ class ClawdletController:
         self.body.on_platform_id = "claude_window"
 
         if not win.is_thinking and self._state_timer >= self._decision_duration:
-            self._transition_from_perch(win)
+            if self.state == PetState.TYPING:
+                self._start_stop_typing()
+            else:
+                self._transition_from_perch(win)
 
         return self._build_render_state(win, win_vel)
 
@@ -537,6 +615,7 @@ class ClawdletController:
         """Advance FSM and physics by ``dt`` seconds."""
         self._clock += dt
         self._state_timer += dt
+        self._tick_projectile(dt)
 
         win_vel = self._update_window_velocity(dt, win)
         perchable_rect = win.rect if (win is not None and win.is_perchable) else None
@@ -555,6 +634,8 @@ class ClawdletController:
             PetState.WANDER,
             PetState.BLOB,
             PetState.TYPING,
+            PetState.PUT_AWAY_LAPTOP,
+            PetState.KICK_LAPTOP,
         ):
             perched_render = self._tick_perched_on_claude(dt, win, win_vel)
             if perched_render is not None:
@@ -570,7 +651,11 @@ class ClawdletController:
                 self._state_timer = 0.0
                 self._decision_duration = 0.8
                 return self._build_render_state(win, win_vel)
-            if self.manual_typing and self.state != PetState.TYPING:
+            if self.manual_typing and self.state not in (
+                PetState.TYPING,
+                PetState.PUT_AWAY_LAPTOP,
+                PetState.KICK_LAPTOP,
+            ):
                 self.body.vx = 0.0
                 self.body.vy = 0.0
                 self.state = PetState.TYPING
@@ -681,7 +766,15 @@ class ClawdletController:
                     self.state = PetState.IDLE
                     self._state_timer = 0.0
                     self._decision_duration = self._rng.uniform(2.0, 4.0) * rest_mult
-            elif self.state in (PetState.IDLE, PetState.BLOB, PetState.TYPING):
+            elif self.state == PetState.TYPING:
+                if self._state_timer >= self._decision_duration:
+                    self._start_stop_typing()
+            elif self.state in (
+                PetState.IDLE,
+                PetState.BLOB,
+                PetState.PUT_AWAY_LAPTOP,
+                PetState.KICK_LAPTOP,
+            ):
                 if self._state_timer >= self._decision_duration:
                     self._transition_from_floor_rest(win)
             else:
@@ -732,10 +825,24 @@ class ClawdletController:
 
         if self.state == PetState.CLIMB:
             flip_x = self._climb_wall_side > 0
-        elif self.state == PetState.TYPING:
+        elif self.state in (
+            PetState.TYPING,
+            PetState.PUT_AWAY_LAPTOP,
+            PetState.KICK_LAPTOP,
+        ):
             flip_x = False
         else:
             flip_x = self.facing < 0
+
+        proj_state: ProjectileRenderState | None = None
+        if self._proj_active:
+            proj_anim = "laptop_spin" if self._proj_phase == "flying" else "laptop_wall_hit"
+            proj_state = ProjectileRenderState(
+                x=round(self._proj_x),
+                y=round(self._proj_y),
+                animation_name=proj_anim,
+                elapsed_s=self._proj_elapsed_s,
+            )
 
         return RenderFrameState(
             x=round(self.body.x),
@@ -749,4 +856,5 @@ class ClawdletController:
             vy=self.body.vy,
             locked_hwnd=win.hwnd if (win is not None and win.is_perchable) else None,
             window_speed=win_vel.magnitude,
+            projectile=proj_state,
         )

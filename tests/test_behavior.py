@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from clawdlet.behavior import ClawdletController, PetState, WindowSnapshot
+from clawdlet.behavior import ActivityMode, ClawdletController, PetState, WindowSnapshot
 from clawdlet.config import PhysicsConfig, TrackerConfig
 from clawdlet.geometry import Rect
 from clawdlet.physics import PhysicsBody
@@ -266,7 +266,8 @@ def test_claude_thinking_triggers_laptop_typing_state() -> None:
     assert frame.animation_name == "typing_laptop"
     assert frame.flip_x is False
 
-    # Manual typing toggle also works on the floor
+    # Manual typing toggle also works on the floor:
+    # Standard mode (ActivityMode.NORMAL) plays PUT_AWAY_LAPTOP when stopping typing
     ctrl.summon_to_center()
     for _ in range(120):
         ctrl.tick(dt, None)
@@ -275,13 +276,45 @@ def test_claude_thinking_triggers_laptop_typing_state() -> None:
     assert ctrl.toggle_typing() is True
     assert ctrl.state == PetState.TYPING
     assert ctrl.toggle_typing() is False
+    assert ctrl.state == PetState.PUT_AWAY_LAPTOP
+    for _ in range(90):
+        ctrl.tick(dt, None)
+        if ctrl.state == PetState.IDLE:
+            break
     assert ctrl.state == PetState.IDLE
 
-    # Toggling typing ON also automatically finishes after ~6s and returns to autonomous actions
+    # Hyper mode (ActivityMode.HYPER) plays KICK_LAPTOP and launches a projectile to the left screen edge
+    ctrl.set_activity_mode(ActivityMode.HYPER)
     assert ctrl.toggle_typing() is True
     assert ctrl.state == PetState.TYPING
-    for _ in range(380):  # ~6.33s at 60Hz
-        ctrl.tick(dt, None)
+    assert ctrl.toggle_typing() is False
+    assert ctrl.state == PetState.KICK_LAPTOP
+    saw_spin_proj = False
+    saw_wall_hit = False
+    for _ in range(160):
+        frame = ctrl.tick(dt, None)
+        if frame.projectile is not None:
+            if frame.projectile.animation_name == "laptop_spin":
+                saw_spin_proj = True
+            elif frame.projectile.animation_name == "laptop_wall_hit":
+                saw_wall_hit = True
+                assert frame.projectile.x == round(ctrl.work_area.left)
+        if ctrl.state != PetState.KICK_LAPTOP and frame.projectile is None:
+            break
+    assert saw_spin_proj, "Expected kicked laptop projectile to spin across the screen"
+    assert saw_wall_hit, "Expected kicked laptop projectile to hit the left screen edge (work_area.left)"
+    assert ctrl.state != PetState.KICK_LAPTOP
+
+    # Toggling typing ON also automatically finishes after ~6s, kicks laptop, and returns to autonomous actions
+    assert ctrl.toggle_typing() is True
+    assert ctrl.state == PetState.TYPING
+    saw_kick = False
+    for _ in range(480):  # ~8s at 60Hz (6s typing + 1.28s kick)
+        frame = ctrl.tick(dt, None)
+        if frame.state == PetState.KICK_LAPTOP:
+            saw_kick = True
+    assert saw_kick
     assert ctrl.manual_typing is False
-    assert ctrl.state != PetState.TYPING
+    assert ctrl.state not in (PetState.TYPING, PetState.KICK_LAPTOP)
+
 

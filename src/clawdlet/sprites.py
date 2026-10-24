@@ -5,11 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 
 from PIL import Image
 
 CHROMA_KEY_RGB = (1, 2, 3)
 CHROMA_KEY_HEX = "#010203"
+
+
+def default_sprites_dir() -> Path:
+    """Resolve the sprites directory in both editable installs and PyInstaller single-file bundles."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass is not None:
+        return Path(str(meipass)) / "assets" / "sprites"
+    return Path(__file__).resolve().parents[2] / "assets" / "sprites"
 
 
 @dataclass(frozen=True)
@@ -91,8 +100,7 @@ class SpriteSheetBank:
         self.scale = int(scale)
 
         if assets_dir is None:
-            repo_root = Path(__file__).resolve().parents[2]
-            assets_dir = repo_root / "assets" / "sprites"
+            assets_dir = default_sprites_dir()
         self.assets_dir = assets_dir
 
         manifest_path = self.assets_dir / "manifest.json"

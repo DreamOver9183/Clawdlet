@@ -39,6 +39,12 @@ class ClawdletOverlay:
         self._last_pos: tuple[int, int] | None = None
         self._last_render_key: tuple[str, int, int, int, bool, int] | None = None
 
+        # Secondary projectile overlay for kicked laptop flying to the screen edge
+        self._proj_photo: ImageTk.PhotoImage | None = None
+        self._proj_visible: bool = False
+        self._proj_last_pos: tuple[int, int] | None = None
+        self._proj_last_key: tuple[str, int, int] | None = None
+
         self._configure_window()
 
     @property
@@ -106,6 +112,25 @@ class ClawdletOverlay:
         self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<ButtonPress-3>", self._on_right_press)
 
+        # Configure secondary transparent projectile window (hidden until kicked laptop spawns)
+        self._proj_win = tk.Toplevel(self.root)
+        self._proj_win.title("ClawdletProjectile")
+        self._proj_win.overrideredirect(True)
+        self._proj_win.wm_attributes("-topmost", True)
+        self._proj_win.wm_attributes("-transparentcolor", CHROMA_KEY_HEX)
+        self._proj_win.configure(bg=CHROMA_KEY_HEX)
+        self._proj_canvas = tk.Canvas(
+            self._proj_win,
+            width=self.width,
+            height=self.height,
+            bg=CHROMA_KEY_HEX,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._proj_canvas.pack(fill="both", expand=True)
+        self._proj_image_item = self._proj_canvas.create_image(0, 0, anchor="nw")
+        self._proj_win.withdraw()
+
         self.root.update_idletasks()
         if self.click_through:
             self.set_click_through(True)
@@ -148,8 +173,11 @@ class ClawdletOverlay:
 
         self.canvas.configure(width=self.width, height=self.height)
         self.canvas.coords(self._debug_bg_item, 0, 0, self.width, 18)
+        self._proj_canvas.configure(width=self.width, height=self.height)
         self._last_render_key = None
         self._last_pos = None
+        self._proj_last_key = None
+        self._proj_last_pos = None
         nx = round(self.controller.body.x)
         ny = round(self.controller.body.y)
         self.root.geometry(f"{self.width}x{self.height}+{nx}+{ny}")
@@ -200,6 +228,37 @@ class ClawdletOverlay:
             self.root.geometry(f"{self.width}x{self.height}+{state.x}+{state.y}")
 
         self.root.wm_attributes("-topmost", True)
+
+        # Sync cross-screen kicked laptop projectile window
+        proj = state.projectile
+        if proj is None:
+            if self._proj_visible:
+                self._proj_win.withdraw()
+                self._proj_visible = False
+                self._proj_last_pos = None
+        else:
+            if not self._proj_visible:
+                self._proj_win.deiconify()
+                self._proj_win.wm_attributes("-topmost", True)
+                self._proj_visible = True
+
+            pframe = self.sprite_bank.get_frame(proj.animation_name, proj.elapsed_s)
+            pkey = (proj.animation_name, id(pframe.image), self.sprite_bank.scale)
+            if pkey != self._proj_last_key or self._proj_photo is None:
+                self._proj_last_key = pkey
+                pcomp = pframe.render_with_squash(
+                    scale_x=1.0,
+                    scale_y=1.0,
+                    flip_x=False,
+                    chroma_rgb=CHROMA_KEY_RGB,
+                )
+                self._proj_photo = ImageTk.PhotoImage(pcomp, master=self.root)
+                self._proj_canvas.itemconfigure(self._proj_image_item, image=self._proj_photo)
+
+            ppos = (proj.x, proj.y)
+            if ppos != self._proj_last_pos:
+                self._proj_last_pos = ppos
+                self._proj_win.geometry(f"{self.width}x{self.height}+{proj.x}+{proj.y}")
 
     def _on_left_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if self.click_through:

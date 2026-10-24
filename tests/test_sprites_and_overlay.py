@@ -21,16 +21,20 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
     assert manifest_path.exists()
 
     expected_frames = {
-        "idle_breathe": 4,
-        "idle_blob": 4,
-        "walk_horizontal": 6,
+        "idle_breathe": 8,
+        "idle_blob": 6,
+        "walk_horizontal": 8,
         "typing_laptop": 19,
-        "climb_vertical": 4,
-        "perch_look_down": 4,
-        "dragged_struggle": 4,
-        "free_fall": 2,
-        "land_squish": 3,
-        "dizzy": 4,
+        "put_away_laptop": 6,
+        "kick_laptop": 7,
+        "laptop_spin": 4,
+        "laptop_wall_hit": 14,
+        "climb_vertical": 6,
+        "perch_look_down": 6,
+        "dragged_struggle": 6,
+        "free_fall": 4,
+        "land_squish": 4,
+        "dizzy": 6,
     }
     for anim_name, frame_count in expected_frames.items():
         strip_path = tmp_path / f"{anim_name}.png"
@@ -45,6 +49,8 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
         "idle_blob",
         "walk_horizontal",
         "typing_laptop",
+        "put_away_laptop",
+        "kick_laptop",
         "perch_look_down",
         "land_squish",
         "dizzy",
