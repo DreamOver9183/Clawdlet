@@ -56,7 +56,7 @@ def _install_fake_processes(
     )
 
 
-def test_thinking_detected_from_desktop_cpu_and_io(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_thinking_detected_from_sustained_desktop_io(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker = Win32ClaudeTracker()
     desktop = _FakeProc(pid=100, cpu_s=10.0, io_bytes=1_000_000)
     blocked = _FakeProc(pid=101, cpu_s=5.0, io_bytes=0, io_error=True)
@@ -68,15 +68,57 @@ def test_thinking_detected_from_desktop_cpu_and_io(monkeypatch: pytest.MonkeyPat
     assert tracker.last_thinking_sample is not None
     assert tracker.last_thinking_sample.proc_count == 1  # AccessDenied process skipped, not fatal
 
-    # Streaming reply: +0.5 s CPU and +100 KB I/O within one second
-    desktop.cpu_s += 0.5
-    desktop.io_bytes += 100 * 1024
-    assert tracker.poll_thinking_status(11.0) is True
+    # Streaming reply: ~40 KB/s of main-process I/O across consecutive 0.5 s samples
+    results = []
+    for i in range(1, 4):
+        desktop.cpu_s += 0.1
+        desktop.io_bytes += 20 * 1024
+        results.append(tracker.poll_thinking_status(10.0 + 0.5 * i))
+    assert results == [False, False, True]  # one burst is not enough; sustained I/O is
     sample = tracker.last_thinking_sample
-    assert sample.proc_count == 1
-    assert sample.cpu_rate == pytest.approx(0.5)
-    assert sample.io_rate == pytest.approx(100 * 1024)
+    assert sample.io_rate == pytest.approx(40 * 1024)
+    assert sample.active_samples == 3
     assert sample.is_thinking is True
+
+    # Stream ends: thinking holds briefly, then clears
+    assert tracker.poll_thinking_status(12.0) is True
+    assert tracker.poll_thinking_status(14.0) is False
+
+
+def test_thinking_ignores_renderer_gpu_compositor_traffic(monkeypatch: pytest.MonkeyPatch) -> None:
+    tracker = Win32ClaudeTracker()
+    renderer = _FakeProc(pid=300, cpu_s=1.0, io_bytes=0)
+    gpu = _FakeProc(pid=301, cpu_s=1.0, io_bytes=0)
+    procs = {300: DESKTOP_EXE + " --type=renderer", 301: DESKTOP_EXE + " --type=gpu-process"}
+    monkeypatch.setattr(window_tracker.psutil, "process_iter", lambda _attrs=None: iter([renderer, gpu]))
+    monkeypatch.setattr(
+        tracker,
+        "_query_process_info",
+        lambda pid: ("claude.exe", DESKTOP_EXE, tuple(procs[pid].split(" "))),
+    )
+    tracker.poll_thinking_status(10.0)
+    for i in range(1, 10):
+        # A spinner animating at 60 FPS: ~4.6 MB/s of frames between renderer and GPU process
+        renderer.io_bytes += 2_300_000
+        gpu.io_bytes += 2_300_000
+        assert tracker.poll_thinking_status(10.0 + 0.5 * i) is False
+    assert tracker.last_thinking_sample.proc_count == 0
+
+
+def test_streaming_detector_replays_recorded_desktop_traces() -> None:
+    """KB/s of main+network+node processes, sampled every 0.5 s on a real Claude Desktop."""
+    tool_wait = [2390.4, 0.2, 0.2, 0.2, 0.2, 0.2, 1.6, 1.6, 2.8, 1.2, 0.2, 0.2, 0.2, 56.7, 1.9, 0.2,
+                 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+    streaming = [40.1, 0.2, 45.1, 14.9, 0.2, 0.0, 11.3, 1.1, 0.2, 49.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2,
+                 2.8, 54.4, 120.3, 16.2, 1.2, 18.0, 146.5, 16.9, 23.8, 43.7]
+
+    det = window_tracker.StreamingActivityDetector()
+    assert not any(det.update(i * 0.5, kbs * 1024) for i, kbs in enumerate(tool_wait))
+
+    det = window_tracker.StreamingActivityDetector()
+    states = [det.update(100.0 + i * 0.5, kbs * 1024) for i, kbs in enumerate(streaming)]
+    assert sum(states) / len(states) > 0.5
+    assert all(states[-6:])
 
 
 def test_thinking_ignores_claude_code_cli_processes(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from collections import deque
 from ctypes import wintypes
 from dataclasses import dataclass
 import time
@@ -49,6 +50,52 @@ class ThinkingSample:
     cpu_rate: float  # CPU seconds per second across sampled Claude processes
     io_rate: float   # Bytes per second across sampled Claude processes
     is_thinking: bool
+    active_samples: int = 0  # Active samples inside the sliding window
+
+
+# Chromium helper roles whose I/O never reflects a response streaming in: the GPU process and
+# renderers exchange compositor frames continuously while anything on screen animates.
+_IGNORED_PROCESS_TYPES = ("--type=gpu-process", "--type=renderer", "--type=crashpad")
+
+
+class StreamingActivityDetector:
+    """Debounced "is Claude streaming?" decision from periodic I/O-rate samples.
+
+    A sample is active when its I/O rate reaches ``threshold``. Thinking starts once at least
+    ``min_active`` active samples fall inside the last ``window_s`` seconds, so isolated bursts
+    (session saves, settings writes) never trigger it, and holds for ``hold_s`` afterwards.
+    """
+
+    def __init__(
+        self,
+        threshold: float = 3072.0,
+        window_s: float = 3.0,
+        min_active: int = 3,
+        hold_s: float = 1.5,
+    ) -> None:
+        self.threshold = threshold
+        self.window_s = window_s
+        self.min_active = min_active
+        self.hold_s = hold_s
+        self._active_times: deque[float] = deque()
+        self._hold_until = float("-inf")
+
+    @property
+    def active_samples(self) -> int:
+        return len(self._active_times)
+
+    def update(self, now_s: float, io_rate: float) -> bool:
+        if io_rate >= self.threshold:
+            self._active_times.append(now_s)
+        cutoff = now_s - self.window_s
+        while self._active_times and self._active_times[0] < cutoff:
+            self._active_times.popleft()
+        if len(self._active_times) >= self.min_active:
+            self._hold_until = now_s + self.hold_s
+        return now_s < self._hold_until
+
+    def is_active(self, now_s: float) -> bool:
+        return now_s < self._hold_until
 
 
 def is_claude_desktop_window(info: WindowCandidateInfo, cfg: TrackerConfig) -> bool:
@@ -177,7 +224,12 @@ class Win32ClaudeTracker:
         self._pid_cache: dict[int, tuple[str, str, tuple[str, ...]]] = {}
         self._last_thinking_sample_time: float = -999.0
         self._prev_proc_totals: tuple[float, int] | None = None
-        self._thinking_hold_until: float = -999.0
+        self._thinking = StreamingActivityDetector(
+            threshold=self.cfg.thinking_io_threshold,
+            window_s=self.cfg.thinking_window_s,
+            min_active=self.cfg.thinking_min_active,
+            hold_s=self.cfg.thinking_hold_s,
+        )
         self._is_thinking: bool = False
         self.last_thinking_sample: ThinkingSample | None = None
 
@@ -188,7 +240,7 @@ class Win32ClaudeTracker:
     def poll_thinking_status(self, now_s: float) -> bool:
         """Detect whether Claude Desktop / Claude Code is actively thinking or streaming."""
         if (now_s - self._last_thinking_sample_time) < 0.45:
-            return self._is_thinking or (now_s < self._thinking_hold_until)
+            return self._thinking.is_active(now_s)
 
         dt = now_s - self._last_thinking_sample_time
         self._last_thinking_sample_time = now_s
@@ -205,11 +257,11 @@ class Win32ClaudeTracker:
                         continue
                     pid = int(proc.info.get("pid") or 0)
                     _, exe_path, cmdline = self._query_process_info(pid)
-                    # Exclude Claude Code CLI and Electron GPU/crashpad helper processes
+                    # Exclude Claude Code CLI children and compositor/crash helper processes
                     exe_path_lower = exe_path.lower()
                     if any(kw.lower() in exe_path_lower for kw in self.cfg.excluded_path_keywords):
                         continue
-                    if any("--type=gpu-process" in arg or "--type=crashpad" in arg for arg in cmdline):
+                    if any(arg.startswith(_IGNORED_PROCESS_TYPES) for arg in cmdline):
                         continue
                     cpu = proc.cpu_times()
                     io = proc.io_counters()
@@ -229,17 +281,15 @@ class Win32ClaudeTracker:
             d_io = max(0, total_io - prev_io)
             cpu_rate = d_cpu / dt
             io_rate = d_io / dt
-            # Active streaming/thinking in Claude Desktop produces sustained CPU + IPC/Network I/O
-            if cpu_rate >= 0.06 and io_rate >= 24576.0:
-                self._thinking_hold_until = now_s + 2.2
 
         self._prev_proc_totals = (total_cpu, total_io)
-        self._is_thinking = now_s < self._thinking_hold_until
+        self._is_thinking = self._thinking.update(now_s, io_rate)
         self.last_thinking_sample = ThinkingSample(
             proc_count=proc_count,
             cpu_rate=cpu_rate,
             io_rate=io_rate,
             is_thinking=self._is_thinking,
+            active_samples=self._thinking.active_samples,
         )
         return self._is_thinking
 

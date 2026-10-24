@@ -87,6 +87,12 @@ class TrackerConfig:
     rescan_interval_s: float = 0.5     # 2 Hz full EnumWindows scan when unlocked or verifying
     shake_speed_threshold: float = 1600.0  # Window drag velocity threshold v_threshold (px/s)
     velocity_ema_alpha: float = 0.45   # Exponential smoothing factor for window velocity
+    # Claude Desktop "thinking" = sustained IPC/network I/O in the main, network and node processes.
+    # Renderer <-> GPU compositor traffic (~4 MB/s whenever anything animates) is excluded.
+    thinking_io_threshold: float = 3072.0  # Bytes/s for a sample to count as active
+    thinking_window_s: float = 3.0     # Sliding window of recent samples
+    thinking_min_active: int = 3       # Active samples needed inside the window
+    thinking_hold_s: float = 1.5       # Keep typing this long after the last positive window
 
 
 @dataclass(frozen=True)

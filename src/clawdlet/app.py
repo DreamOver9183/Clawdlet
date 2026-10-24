@@ -398,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"[Clawdlet] thinking-sample procs={sample.proc_count} "
                 f"cpu={sample.cpu_rate:.2f} io={sample.io_rate / 1024.0:.1f}KB/s "
-                f"thinking={sample.is_thinking}"
+                f"active={sample.active_samples} thinking={sample.is_thinking}"
             )
 
         root.after(12, _on_tick)
