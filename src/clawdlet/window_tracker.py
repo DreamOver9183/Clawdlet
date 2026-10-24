@@ -40,6 +40,16 @@ class WindowCandidateInfo:
     rect: Rect
 
 
+@dataclass(frozen=True)
+class ThinkingSample:
+    """Most recent CPU/IO sample used by the Claude 'thinking' heuristic (for --debug output)."""
+
+    proc_count: int
+    cpu_rate: float  # CPU seconds per second across sampled Claude processes
+    io_rate: float   # Bytes per second across sampled Claude processes
+    is_thinking: bool
+
+
 def is_claude_desktop_window(info: WindowCandidateInfo, cfg: TrackerConfig) -> bool:
     """Pure predicate to determine if a window belongs to the main Claude Desktop GUI."""
     if not info.visible or info.minimized or info.cloaked != 0:
@@ -147,6 +157,7 @@ class Win32ClaudeTracker:
         self._prev_proc_totals: tuple[float, int] | None = None
         self._thinking_hold_until: float = -999.0
         self._is_thinking: bool = False
+        self.last_thinking_sample: ThinkingSample | None = None
 
     @property
     def locked_hwnd(self) -> int | None:
@@ -162,28 +173,34 @@ class Win32ClaudeTracker:
 
         total_cpu = 0.0
         total_io = 0
+        proc_count = 0
         try:
             for proc in psutil.process_iter(["pid", "name"]):
-                name = proc.info.get("name") or ""
-                if name.lower() != self.cfg.target_exe_name.lower():
-                    continue
-                pid = int(proc.info.get("pid") or 0)
-                _, exe_path, cmdline = self._query_process_info(pid)
-                # Exclude Claude Code CLI and Electron GPU/crashpad helper processes
-                if any(ex.lower() in exe_path.lower() for ex in self.cfg.excluded_exe_substrings):
-                    continue
-                if any("--type=gpu-process" in arg or "--type=crashpad" in arg for arg in cmdline):
-                    continue
+                # A single vanished/protected process must not zero out the whole sample
                 try:
+                    name = proc.info.get("name") or ""
+                    if name.lower() != self.cfg.target_exe_name.lower():
+                        continue
+                    pid = int(proc.info.get("pid") or 0)
+                    _, exe_path, cmdline = self._query_process_info(pid)
+                    # Exclude Claude Code CLI and Electron GPU/crashpad helper processes
+                    exe_path_lower = exe_path.lower()
+                    if any(kw.lower() in exe_path_lower for kw in self.cfg.excluded_path_keywords):
+                        continue
+                    if any("--type=gpu-process" in arg or "--type=crashpad" in arg for arg in cmdline):
+                        continue
                     cpu = proc.cpu_times()
                     io = proc.io_counters()
                     total_cpu += float(cpu.user + cpu.system)
                     total_io += int(io.read_bytes + io.write_bytes)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    proc_count += 1
+                except (psutil.Error, OSError):
                     continue
         except Exception:
             pass
 
+        cpu_rate = 0.0
+        io_rate = 0.0
         if self._prev_proc_totals is not None and 0.1 <= dt <= 5.0:
             prev_cpu, prev_io = self._prev_proc_totals
             d_cpu = max(0.0, total_cpu - prev_cpu)
@@ -196,6 +213,12 @@ class Win32ClaudeTracker:
 
         self._prev_proc_totals = (total_cpu, total_io)
         self._is_thinking = now_s < self._thinking_hold_until
+        self.last_thinking_sample = ThinkingSample(
+            proc_count=proc_count,
+            cpu_rate=cpu_rate,
+            io_rate=io_rate,
+            is_thinking=self._is_thinking,
+        )
         return self._is_thinking
 
     def _query_process_info(self, pid: int) -> tuple[str, str, tuple[str, ...]]:
@@ -334,7 +357,8 @@ class Win32ClaudeTracker:
                 except Exception:
                     self._locked_hwnd = None
 
-        if (now - self._last_scan_time) >= self.cfg.rescan_interval_s or self._locked_hwnd is None:
+        # Rescan at 2 Hz whether locked (verify) or unlocked (Claude not open), never every frame
+        if (now - self._last_scan_time) >= self.cfg.rescan_interval_s:
             self._last_scan_time = now
             snap = self.find_best_claude_window()
             self._locked_hwnd = snap.hwnd if snap is not None else None

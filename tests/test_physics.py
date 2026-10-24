@@ -96,3 +96,44 @@ def test_wall_bounce_and_floor_collision() -> None:
     assert floor_impact.surface == "floor"
     assert body_floor.bottom == pytest.approx(816.0)
     assert body_floor.vy < 0.0  # Rebounded upward
+
+
+def test_lands_on_window_whose_top_is_closer_to_screen_top_than_pet_height() -> None:
+    """Claude window top at y=110 with a 128px pet: the pet pokes above the work area to perch."""
+    cfg = PhysicsConfig()
+    work_area = Rect(0.0, 0.0, 1920.0, 1020.0)
+    claude_rect = Rect(165.0, 110.0, 1596.0, 924.0)
+    body = PhysicsBody(x=816.0, y=claude_rect.top - 128.0, width=128.0, height=128.0)
+
+    impact = step_physics(body, cfg.dt, cfg, work_area, claude_rect)
+    assert impact.landed
+    assert impact.surface == "claude_window"
+    assert body.bottom == pytest.approx(claude_rect.top)
+    assert body.y < work_area.top
+
+
+def test_ceiling_stays_at_work_area_top_away_from_the_window() -> None:
+    cfg = PhysicsConfig()
+    work_area = Rect(0.0, 0.0, 1920.0, 1020.0)
+    claude_rect = Rect(165.0, 110.0, 600.0, 924.0)
+    # Horizontally clear of the window: no ceiling allowance
+    body = PhysicsBody(x=1200.0, y=-30.0, width=128.0, height=128.0, vy=-200.0)
+    step_physics(body, cfg.dt, cfg, work_area, claude_rect)
+    assert body.y == pytest.approx(work_area.top)
+
+
+def test_flung_up_past_window_near_screen_top_falls_back_onto_it() -> None:
+    """Thrown upward through a window whose top (y=110) is lower than the pet is tall (128px)."""
+    cfg = PhysicsConfig()
+    work_area = Rect(0.0, 0.0, 1920.0, 1020.0)
+    claude_rect = Rect(165.0, 110.0, 1596.0, 924.0)
+    body = PhysicsBody(x=816.0, y=300.0, width=128.0, height=128.0, vy=-1600.0)
+
+    landed_surface = None
+    for _ in range(240):
+        impact = step_physics(body, cfg.dt, cfg, work_area, claude_rect)
+        if impact.landed:
+            landed_surface = impact.surface
+            break
+    assert landed_surface == "claude_window"
+    assert body.bottom == pytest.approx(claude_rect.top)

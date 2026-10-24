@@ -98,18 +98,28 @@ def step_physics(
             body.vx = -body.vx * cfg.restitution
             bounced_wall = True
 
-    # Ceiling guard
-    if body.y < work_area.top:
-        body.y = work_area.top
+    within_vertical_bounds = False
+    has_enough_overlap = False
+    if claude_rect is not None:
+        within_vertical_bounds = (
+            work_area.top + body.height * 0.25 <= claude_rect.top <= work_area.bottom
+        )
+        overlap_x = claude_rect.horizontal_overlap(body.x, body.right)
+        has_enough_overlap = overlap_x >= body.width * cfg.platform_overlap_ratio
+
+    # Ceiling guard. Above a Claude window whose top sits closer to the screen top than the pet is
+    # tall, let the pet poke above the work area so it can still rest on (and fall onto) the window.
+    ceiling_y = work_area.top
+    if claude_rect is not None and within_vertical_bounds and has_enough_overlap:
+        ceiling_y = min(ceiling_y, claude_rect.top - body.height)
+    if body.y < ceiling_y:
+        body.y = ceiling_y
         if body.vy < 0.0:
             body.vy = -body.vy * cfg.restitution
 
     # 4. One-way platform collision with Claude Desktop window top edge
     if claude_rect is not None:
         plat_y = claude_rect.top
-        within_vertical_bounds = work_area.top + body.height * 0.25 <= plat_y <= work_area.bottom
-        overlap_x = claude_rect.horizontal_overlap(body.x, body.right)
-        has_enough_overlap = overlap_x >= body.width * cfg.platform_overlap_ratio
         crossed_from_above = (
             body.vy >= 0.0
             and prev_bottom <= plat_y + 6.0

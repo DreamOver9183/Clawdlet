@@ -31,12 +31,15 @@ class PetState(str, Enum):
     PERCH_CLAUDE = "perch_look_down"
     DRAGGED = "dragged_struggle"
     FALLING = "free_fall"
-    THROWN = "free_fall"
+    THROWN = "thrown"
     LAND_SQUISH = "land_squish"
     DIZZY = "dizzy"
 
     @property
     def animation_name(self) -> str:
+        # THROWN is a distinct FSM state (ends in DIZZY) but shares the free-fall sprite
+        if self is PetState.THROWN:
+            return PetState.FALLING.value
         return self.value
 
 
@@ -53,6 +56,26 @@ class WindowSnapshot:
     @property
     def is_perchable(self) -> bool:
         return self.visible and not self.minimized and self.rect.width > 0 and self.rect.height > 0
+
+
+def drop_y_above_window(
+    win_rect: Rect,
+    body_height: float,
+    work_area: Rect,
+    clearance: float,
+) -> float:
+    """Return a spawn/summon y that drops onto ``win_rect``'s top from up to ``clearance`` px above.
+
+    The feet never start below the window top (otherwise the one-way platform is missed and the pet
+    falls through). When the window top is closer to the screen top than the pet is tall, the pet
+    starts partly above the work area, matching the physics ceiling allowance.
+    """
+    rest_y = win_rect.top - body_height
+    if win_rect.top < work_area.top + body_height * 0.25:
+        # Window top is (nearly) at the screen top, e.g. maximized: no room to perch, drop from the top
+        return max(work_area.top, rest_y - clearance)
+    highest_y = min(work_area.top, rest_y)
+    return max(highest_y, rest_y - clearance)
 
 
 @dataclass(frozen=True)
@@ -86,10 +109,11 @@ class RenderFrameState:
 class ClawdletController:
     """Coordinates the FSM, autonomous wandering/climbing, mouse drag/throw, and Claude window perching."""
 
-    SQUISH_DURATION_S: float = 0.20
+    SQUISH_DURATION_S: float = 0.40       # land_squish: 4 frames @ 10 FPS
     DIZZY_DURATION_S: float = 1.80
     PUT_AWAY_DURATION_S: float = 1.10
     KICK_LAPTOP_DURATION_S: float = 1.28
+    KICK_RELEASE_S: float = 2.0 / 5.5     # kick_laptop frame 2 @ 5.5 FPS: laptop leaves the foot
     POINTER_HISTORY_WINDOW_S: float = 0.10
 
     def __init__(
@@ -111,7 +135,6 @@ class ClawdletController:
         self.state: PetState = PetState.FALLING
         self._state_timer: float = 0.0
         self._decision_duration: float = 2.8
-        self._squish_intensity: float = 0.0
         self._pending_dizzy: bool = False
 
         # Locomotion & climbing state
@@ -207,7 +230,7 @@ class ClawdletController:
                 win.rect.center_x - self.body.width * 0.5,
                 self.body.width,
             )
-            self.body.y = max(self.work_area.top, win.rect.top - self.body.height - 110.0)
+            self.body.y = drop_y_above_window(win.rect, self.body.height, self.work_area, 110.0)
             self.body.vx = 0.0
             self.body.vy = 0.0
         else:
@@ -238,8 +261,8 @@ class ClawdletController:
         if self._proj_spawn_pending:
             if self.state != PetState.KICK_LAPTOP:
                 self._proj_spawn_pending = False
-            elif self._state_timer >= 0.18:
-                # Frame 1 of kick_laptop: launch the projectile from Clawd's front-left foot!
+            elif self._state_timer >= self.KICK_RELEASE_S:
+                # Frame 2 of kick_laptop: the sprite no longer draws the laptop, launch the projectile!
                 self._proj_spawn_pending = False
                 self._proj_active = True
                 self._proj_phase = "flying"
@@ -275,11 +298,10 @@ class ClawdletController:
     def toggle_typing(self) -> bool:
         """Toggle manual laptop-typing mode when grounded or perched (plays for ~6s then puts away)."""
         self.manual_typing = not self.manual_typing
-        if self.manual_typing and self.body.grounded:
-            self.body.vx = 0.0
-            self.state = PetState.TYPING
-            self._state_timer = 0.0
-            self._decision_duration = 6.0
+        if self.manual_typing and self.state in (PetState.PUT_AWAY_LAPTOP, PetState.KICK_LAPTOP):
+            pass  # Let the put-away / kick finish; the rest transition pulls the laptop back out
+        elif self.manual_typing and self.body.grounded:
+            self._enter_manual_typing()
         elif not self.manual_typing and self.state == PetState.TYPING:
             self._start_stop_typing()
         return self.manual_typing
@@ -425,9 +447,18 @@ class ClawdletController:
         self.body.grounded = False
         self.body.on_platform_id = None
 
+    def _enter_manual_typing(self) -> None:
+        self.body.vx = 0.0
+        self.state = PetState.TYPING
+        self._state_timer = 0.0
+        self._decision_duration = 6.0
+
     def _transition_from_floor_rest(self, win: WindowSnapshot | None) -> None:
         """Choose next autonomous state when IDLE, BLOB, or TYPING timer expires on the floor."""
-        self.manual_typing = False
+        if self.manual_typing:
+            # Double-clicked again while putting the laptop away: pull it straight back out
+            self._enter_manual_typing()
+            return
         rest_mult = self.profile.rest_duration_multiplier
         r = self._rng.random()
         if self._is_claude_climbable(win) and r < self.effective_seek_weight:
@@ -466,7 +497,9 @@ class ClawdletController:
 
     def _transition_from_perch(self, win: WindowSnapshot) -> None:
         """Choose next autonomous state while perched on Claude Desktop's top border."""
-        self.manual_typing = False
+        if self.manual_typing:
+            self._enter_manual_typing()
+            return
         rest_mult = self.profile.rest_duration_multiplier
         roll = self._rng.random()
         can_stroll = win.rect.width >= self.body.width * 1.4
@@ -580,10 +613,12 @@ class ClawdletController:
             self.state = PetState.TYPING
             self._state_timer = 0.0
             self._decision_duration = 0.8
-        elif self.manual_typing and self.state != PetState.TYPING:
-            self.state = PetState.TYPING
-            self._state_timer = 0.0
-            self._decision_duration = 6.0
+        elif self.manual_typing and self.state not in (
+            PetState.TYPING,
+            PetState.PUT_AWAY_LAPTOP,
+            PetState.KICK_LAPTOP,
+        ):
+            self._enter_manual_typing()
         elif self.state == PetState.WANDER:
             step_dx = float(self.facing) * (self.effective_walk_speed * 0.75) * dt
             self._perch_offset_x += step_dx
@@ -608,6 +643,44 @@ class ClawdletController:
                 self._start_stop_typing()
             else:
                 self._transition_from_perch(win)
+
+        return self._build_render_state(win, win_vel)
+
+    def _tick_recovering_on_claude(
+        self,
+        win: WindowSnapshot | None,
+        win_vel: Vec2,
+    ) -> RenderFrameState | None:
+        """Keep LAND_SQUISH / DIZZY pinned to Claude Desktop's top border while the window moves."""
+        if win is None or not win.is_perchable:
+            self._detach_to_fall()
+            return None
+        if win_vel.magnitude > self.tracker_cfg.shake_speed_threshold:
+            self._detach_by_shake(win_vel)
+            return None
+
+        self.body.x = win.rect.clamp_x(win.rect.left + self._perch_offset_x, self.body.width)
+        self.body.y = win.rect.top - self.body.height
+        self._perch_offset_x = self.body.x - win.rect.left
+        self.body.vx = 0.0
+        self.body.vy = 0.0
+        self.body.grounded = True
+        self.body.on_platform_id = "claude_window"
+
+        rest_mult = self.profile.rest_duration_multiplier
+        if self.state == PetState.LAND_SQUISH and self._state_timer >= self.SQUISH_DURATION_S:
+            if self._pending_dizzy:
+                self._pending_dizzy = False
+                self.state = PetState.DIZZY
+                self._state_timer = 0.0
+            else:
+                self.state = PetState.PERCH_CLAUDE
+                self._state_timer = 0.0
+                self._decision_duration = self._rng.uniform(3.0, 5.5) * rest_mult
+        elif self.state == PetState.DIZZY and self._state_timer >= self.DIZZY_DURATION_S:
+            self.state = PetState.PERCH_CLAUDE
+            self._state_timer = 0.0
+            self._decision_duration = self._rng.uniform(2.5, 4.5) * rest_mult
 
         return self._build_render_state(win, win_vel)
 
@@ -641,9 +714,20 @@ class ClawdletController:
             if perched_render is not None:
                 return perched_render
 
+        # 3a. Landing squish / dizzy on Claude Desktop's top border: follow the window until recovered
+        if self._perched_hwnd is not None and self.state in (PetState.LAND_SQUISH, PetState.DIZZY):
+            recovering_render = self._tick_recovering_on_claude(win, win_vel)
+            if recovering_render is not None:
+                return recovering_render
+
         # 3b. If grounded on floor and Claude is actively thinking (or manual typing just toggled), type!
+        # Landing squish and dizzy always play out first.
         claude_thinking = bool(win is not None and win.is_thinking)
-        if self.body.grounded and self._perched_hwnd is None:
+        if (
+            self.body.grounded
+            and self._perched_hwnd is None
+            and self.state not in (PetState.LAND_SQUISH, PetState.DIZZY)
+        ):
             if claude_thinking:
                 self.body.vx = 0.0
                 self.body.vy = 0.0
@@ -691,8 +775,6 @@ class ClawdletController:
 
         # 6. Evaluate state transitions after physics step
         if impact.landed:
-            norm_impact = min(1.0, impact.impact_speed / 1200.0)
-            self._squish_intensity = max(0.18, 0.42 * norm_impact)
             self._seeking_claude = False
 
             if impact.surface == "claude_window" and win is not None and win.is_perchable:
@@ -704,10 +786,6 @@ class ClawdletController:
             self.state = PetState.LAND_SQUISH
             self._state_timer = 0.0
         elif self.state == PetState.LAND_SQUISH:
-            if self.body.on_platform_id == "claude_window" and win is not None and win.is_perchable:
-                self.body.x = win.rect.clamp_x(win.rect.left + self._perch_offset_x, self.body.width)
-                self.body.y = win.rect.top - self.body.height
-
             if self._state_timer >= self.SQUISH_DURATION_S:
                 if self._pending_dizzy and self.body.grounded:
                     self._pending_dizzy = False
@@ -798,8 +876,10 @@ class ClawdletController:
         self.state = PetState.FALLING
         self._pending_dizzy = False
         self._state_timer = 0.0
+        self.manual_typing = False
 
     def _detach_by_shake(self, win_vel: Vec2) -> None:
+        self.manual_typing = False
         self._perched_hwnd = None
         self._climb_surface = None
         self._seeking_claude = False
@@ -815,13 +895,9 @@ class ClawdletController:
         self._state_timer = 0.0
 
     def _build_render_state(self, win: WindowSnapshot | None, win_vel: Vec2) -> RenderFrameState:
+        # Squash & stretch is hand-drawn in land_squish; extra runtime scaling would clip the sprite
         scale_x = 1.0
         scale_y = 1.0
-        if self.state == PetState.LAND_SQUISH:
-            progress = min(1.0, self._state_timer / max(1e-4, self.SQUISH_DURATION_S))
-            envelope = (1.0 - progress) * self._squish_intensity
-            scale_x = 1.0 + envelope
-            scale_y = max(0.55, 1.0 - envelope)
 
         if self.state == PetState.CLIMB:
             flip_x = self._climb_wall_side > 0

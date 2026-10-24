@@ -162,20 +162,22 @@ def _make_strip(frames: list[Image.Image]) -> Image.Image:
 
 
 def _build_idle_breathe() -> list[Image.Image]:
-    """8-frame smooth breathing cycle with 1-frame secondary arm follow-through and natural blink."""
+    """8-frame breathing cycle with arm follow-through, tentacle wiggle (Concept Doc §3.1) and a blink."""
     frames: list[Image.Image] = []
-    # (body_top, body_height, left_arm_dy, right_arm_dy, eye_mode)
+    canon_legs = (8, 12, 18, 22)
+    grounded = (31, 31, 31, 31)
+    # (body_top, body_height, left_arm_dy, right_arm_dy, eye_mode, leg_xs, leg_bottoms)
     specs = [
-        (16, 12, 4, 4, "normal"),  # 0: Canonical docs/clawd.png
-        (16, 12, 4, 4, "normal"),  # 1: Hold upright
-        (17, 11, 3, 3, "normal"),  # 2: Body inhales/dips 1 cell, arms lag slightly up (dy=3 -> y=20)
-        (17, 11, 4, 4, "normal"),  # 3: Arms settle down into dip (y=21) — secondary follow-through!
-        (16, 12, 5, 5, "normal"),  # 4: Body rises back to 16, arms lag 1 cell low (dy=5 -> y=21)
-        (16, 12, 4, 4, "normal"),  # 5: Arms settle back to canonical (y=20)
-        (16, 12, 4, 4, "blink"),   # 6: Crisp blink
-        (16, 12, 4, 4, "normal"),  # 7: Canonical rest
+        (16, 12, 4, 4, "normal", canon_legs, grounded),  # 0: Canonical docs/clawd.png
+        (16, 12, 4, 4, "normal", canon_legs, grounded),  # 1: Hold upright
+        (17, 11, 3, 3, "normal", canon_legs, grounded),  # 2: Body inhales/dips 1 cell, arms lag slightly up
+        (17, 11, 4, 4, "normal", (8, 13, 18, 22), grounded),  # 3: Arms settle; inner-left tentacle sways right
+        (16, 12, 5, 5, "normal", canon_legs, grounded),  # 4: Body rises back, arms lag 1 cell low
+        (16, 12, 4, 4, "normal", canon_legs, (31, 31, 30, 31)),  # 5: Inner-right tentacle curls up 1 cell
+        (16, 12, 4, 4, "blink", canon_legs, grounded),   # 6: Crisp blink
+        (16, 12, 4, 4, "normal", canon_legs, grounded),  # 7: Canonical rest
     ]
-    for b_top, b_h, l_arm, r_arm, eyes in specs:
+    for b_top, b_h, l_arm, r_arm, eyes, l_xs, l_bots in specs:
         g = _new_grid()
         _draw_canonical_clawd(
             g,
@@ -183,6 +185,8 @@ def _build_idle_breathe() -> list[Image.Image]:
             body_height=b_h,
             left_arm_dy=l_arm,
             right_arm_dy=r_arm,
+            leg_xs=l_xs,
+            leg_bottoms=l_bots,
             eye_mode=eyes,
         )
         frames.append(_grid_to_image(g))
@@ -410,18 +414,19 @@ def _build_typing_laptop() -> list[Image.Image]:
     """
     frames: list[Image.Image] = []
 
+    # Frames 0..2 glide the body right (x=8 -> 10 -> 12) so the intro continues from the idle pose (x=8)
     # --- Frame 0: Reach left chunky hand into belly (half of 8x2 thin folded laptop emerging) ---
     g0 = _new_grid()
-    _draw_right_clawd_32(g0, body_left=12, body_top=16, body_width=15, body_height=12, eye_mode="normal")
-    _draw_closed_laptop_32(g0, x0=7, y0=21, width=6)
-    _rect(g0, 9, 20, 4, 4, TERRACOTTA_DARK)
+    _draw_right_clawd_32(g0, body_left=8, body_top=16, body_width=15, body_height=12, eye_mode="normal")
+    _draw_closed_laptop_32(g0, x0=3, y0=21, width=6)
+    _rect(g0, 5, 20, 4, 4, TERRACOTTA_DARK)
     frames.append(_grid_to_image(g0))
 
     # --- Frame 1: Pull full 8x2 thin folded laptop out from torso ---
     g1 = _new_grid()
-    _draw_right_clawd_32(g1, body_left=12, body_top=16, body_width=15, body_height=12, eye_mode="normal")
-    _draw_closed_laptop_32(g1, x0=3, y0=20, width=8)
-    _rect(g1, 9, 19, 4, 4, TERRACOTTA_DARK)
+    _draw_right_clawd_32(g1, body_left=10, body_top=16, body_width=15, body_height=12, eye_mode="normal")
+    _draw_closed_laptop_32(g1, x0=1, y0=20, width=8)
+    _rect(g1, 7, 19, 4, 4, TERRACOTTA_DARK)
     frames.append(_grid_to_image(g1))
 
     # --- Frames 2, 3, 4: HUGE OVERHEAD JUMP & WIND-UP HOLD (holding sleek 8x2 folded laptop!) ---
@@ -1072,22 +1077,28 @@ def _build_climb_vertical() -> list[Image.Image]:
 
 
 def _build_perch_look_down() -> list[Image.Image]:
-    """6-frame curious perch on Claude Desktop titlebar: peeks down, glances left/right, and blinks."""
+    """6-frame perch lying flat on the Claude Desktop titlebar, peeking down into the window (§5).
+
+    Legs fold to 1 unit and the body widens/lowers into a lying pose; eyes sit in the lower half of
+    the face to read as looking down. Unlike idle_blob (sleepy squint, eyes high) the gaze stays alert.
+    """
     frames: list[Image.Image] = []
     # (body_top, body_height, left_arm_dy, right_arm_dy, eye_mode, eye_dx, eye_dy)
     specs = [
-        (17, 11, 4, 4, "normal", 0, 2),   # 0: Peek straight down into window
-        (17, 11, 5, 4, "normal", -1, 2),  # 1: Glance down-left at chat text
-        (18, 10, 4, 4, "normal", -1, 2),  # 2: Settle 1 cell lower while reading
-        (17, 11, 4, 5, "normal", 1, 2),   # 3: Glance down-right
-        (17, 11, 4, 4, "blink", 0, 2),    # 4: Blink
-        (17, 11, 4, 4, "normal", 0, 2),   # 5: Peek center
+        (21, 9, 4, 4, "normal", 0, 4),   # 0: Lie flat, peek straight down into the window
+        (21, 9, 5, 4, "normal", -1, 4),  # 1: Glance down-left at the chat text
+        (22, 8, 4, 4, "normal", 0, 3),   # 2: Lean forward over the edge
+        (21, 9, 4, 5, "normal", 1, 4),   # 3: Glance down-right
+        (21, 9, 4, 4, "blink", 0, 4),    # 4: Blink
+        (21, 9, 4, 4, "normal", 0, 4),   # 5: Peek center
     ]
     for b_top, b_h, l_arm, r_arm, eyes, edx, edy in specs:
         g = _new_grid()
         _draw_canonical_clawd(
             g,
+            body_left=7,
             body_top=b_top,
+            body_width=18,
             body_height=b_h,
             left_arm_dy=l_arm,
             right_arm_dy=r_arm,
@@ -1100,24 +1111,26 @@ def _build_perch_look_down() -> list[Image.Image]:
 
 
 def _build_dragged_struggle() -> list[Image.Image]:
-    """6-frame dangling struggle when held by mouse cursor: body sways, arms wave, legs kick."""
+    """6-frame dangling struggle when held by the mouse (§5): body stretched 1u taller & 1u narrower,
+    arms flailing overhead, long legs kicking in the air."""
     frames: list[Image.Image] = []
     # (body_left, leg_xs, leg_bottoms, left_arm_dy, right_arm_dy, eye_mode)
     specs = [
-        (8, (7, 11, 18, 22), (29, 31, 29, 31), 1, 5, "squint"),
-        (7, (6, 11, 17, 22), (30, 29, 31, 29), 2, 4, "normal"),
-        (8, (8, 12, 18, 22), (31, 29, 29, 31), 5, 1, "squint"),
-        (9, (10, 14, 19, 23), (29, 31, 30, 29), 4, 2, "normal"),
-        (8, (8, 12, 18, 22), (29, 30, 31, 29), 1, 5, "blink"),
-        (8, (7, 12, 17, 22), (31, 29, 29, 31), 5, 1, "squint"),
+        (9, (8, 13, 17, 22), (29, 31, 30, 31), 0, 1, "squint"),
+        (8, (7, 12, 16, 21), (31, 29, 31, 29), 1, 0, "normal"),
+        (9, (9, 13, 17, 21), (30, 31, 29, 30), 0, 1, "squint"),
+        (10, (11, 14, 18, 23), (31, 29, 30, 29), 1, 0, "normal"),
+        (9, (9, 13, 17, 21), (29, 30, 31, 29), 0, 1, "blink"),
+        (9, (8, 13, 16, 22), (31, 29, 29, 31), 1, 0, "squint"),
     ]
     for b_left, l_xs, l_bots, l_arm, r_arm, eyes in specs:
         g = _new_grid()
         _draw_canonical_clawd(
             g,
             body_left=b_left,
-            body_top=14,
-            body_height=12,
+            body_top=10,
+            body_width=14,
+            body_height=14,
             left_arm_dy=l_arm,
             right_arm_dy=r_arm,
             leg_xs=l_xs,

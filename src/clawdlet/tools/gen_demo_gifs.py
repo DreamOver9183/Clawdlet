@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from PIL import Image, ImageDraw
 
+from clawdlet.behavior import ClawdletController
 from clawdlet.sprites import SpriteSheetBank
 
 
@@ -18,16 +20,23 @@ def generate_demo_scene_gif(output_path: Path, bank: SpriteSheetBank) -> Path:
     dt = 0.08  # 12.5 FPS (80ms per frame)
     frames: list[Image.Image] = []
 
-    # Scene timeline (total ~82 frames = 6.56s loop):
+    # Scene timeline (total 88 frames = 7.04s loop):
     # 0..11   (0.00..0.96s): Perched on Claude Desktop titlebar (perch_look_down)
     # 12..45  (0.96..3.68s): Claude is thinking -> typing_laptop (pull out, overhead slam, long-arm typing!)
     # 46..58  (3.68..4.72s): Standard mode put_away_laptop (close lid & tuck into belly)
-    # 59..81  (4.72..6.56s): Hyper mode kick_laptop -> laptop_spin across screen -> 14-frame laptop_wall_hit at x=0!
+    # 59..87  (4.72..7.04s): Hyper mode kick_laptop -> laptop_spin across screen -> 14-frame laptop_wall_hit at x=0!
+    # The laptop only launches once kick_laptop stops drawing it at the foot (same rule as the live app).
+    hit_time_scale = 1.15
+    release_idx = math.ceil(ClawdletController.KICK_RELEASE_S / dt)
+    fly_frames = 4
+    hit_start_idx = release_idx + fly_frames + 1
+    hit_frames = math.ceil((13.0 / 8.0) / (dt * hit_time_scale)) + 1  # until frame 13 of 14 @ 8 FPS shows
+    kick_scene_frames = hit_start_idx + hit_frames
     clawd_x = 410
     win_left, win_top, win_right, win_bottom = 190, 148, 680, 304
     clawd_y = win_top - bank.scaled_height
 
-    for idx in range(82):
+    for idx in range(59 + kick_scene_frames):
         canvas = Image.new("RGBA", (w, h), (18, 20, 28, 255))
         draw = ImageDraw.Draw(canvas)
 
@@ -121,15 +130,15 @@ def generate_demo_scene_gif(output_path: Path, bank: SpriteSheetBank) -> Path:
             c_frame = bank.get_frame("kick_laptop", anim_t).image
             _paste_rgba(canvas, c_frame, clawd_x, clawd_y)
 
-            # Cross-screen projectile launched at kick_idx >= 2
-            if 2 <= kick_idx <= 6:
-                fly_progress = (kick_idx - 2) / 4.0
+            # Cross-screen projectile launched once the laptop leaves the foot
+            if release_idx <= kick_idx < hit_start_idx:
+                fly_progress = (kick_idx - release_idx) / float(fly_frames)
                 proj_x = (clawd_x - 30) * (1.0 - fly_progress)
                 proj_y = clawd_y + 12 - 24 * (fly_progress * (1.0 - fly_progress) * 4.0)
-                p_frame = bank.get_frame("laptop_spin", (kick_idx - 2) * dt).image
+                p_frame = bank.get_frame("laptop_spin", (kick_idx - release_idx) * dt).image
                 _paste_rgba(canvas, p_frame, proj_x, proj_y)
-            elif kick_idx >= 7:
-                hit_t = (kick_idx - 7) * dt * 1.15
+            elif kick_idx >= hit_start_idx:
+                hit_t = (kick_idx - hit_start_idx) * dt * hit_time_scale
                 p_frame = bank.get_frame("laptop_wall_hit", hit_t).image
                 _paste_rgba(canvas, p_frame, 0, clawd_y + 8)
 

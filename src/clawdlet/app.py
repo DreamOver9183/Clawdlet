@@ -9,7 +9,7 @@ import signal
 import time
 import tkinter as tk
 
-from clawdlet.behavior import ClawdletController, WindowSnapshot
+from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
 from clawdlet.config import ActivityMode, PhysicsConfig, TrackerConfig
 from clawdlet.geometry import PixelMapper
 from clawdlet.overlay import ClawdletOverlay
@@ -94,6 +94,11 @@ def _enable_per_monitor_dpi_awareness() -> None:
             pass
 
 
+def sync_tray_state(tray_state: TrayMenuState, controller: ClawdletController) -> None:
+    """Mirror controller-owned toggles (changed by double-click, hop, drag, auto put-away) into the tray menu."""
+    tray_state.manual_typing = controller.manual_typing
+
+
 def dispatch_tray_action(
     cmd_id: int,
     controller: ClawdletController,
@@ -162,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             initial_win.rect.center_x - pet_w * 0.5,
             pet_w,
         )
-        spawn_y = max(work_area.top, initial_win.rect.top - pet_h - 140.0)
+        spawn_y = drop_y_above_window(initial_win.rect, pet_h, work_area, 140.0)
     else:
         spawn_x = work_area.center_x - pet_w * 0.5
         spawn_y = max(work_area.top + 40.0, work_area.center_y - 200.0)
@@ -231,10 +236,12 @@ def main(argv: list[str] | None = None) -> int:
     last_time = start_time
     accumulator = 0.0
     last_logged_state = None
+    last_sample_log_time = start_time
     work_area_refresh_counter = 0
 
     def _on_tick() -> None:
-        nonlocal last_time, accumulator, last_logged_state, work_area_refresh_counter
+        nonlocal last_time, accumulator, last_logged_state, last_sample_log_time
+        nonlocal work_area_refresh_counter
         if not running:
             return
 
@@ -279,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         if render_state is None:
             render_state = controller.tick(fixed_dt, win_snap)
 
+        sync_tray_state(tray_state, controller)
         overlay.sync_frame(render_state, frame_dt)
 
         if overlay.debug and render_state.state != last_logged_state:
@@ -287,6 +295,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"[Clawdlet] state={render_state.state.name} "
                 f"pos=({render_state.x}, {render_state.y}) "
                 f"locked_hwnd={hex(render_state.locked_hwnd) if render_state.locked_hwnd else None}"
+            )
+
+        sample = tracker.last_thinking_sample
+        if overlay.debug and sample is not None and (now - last_sample_log_time) >= 2.0:
+            last_sample_log_time = now
+            print(
+                f"[Clawdlet] thinking-sample procs={sample.proc_count} "
+                f"cpu={sample.cpu_rate:.2f} io={sample.io_rate / 1024.0:.1f}KB/s "
+                f"thinking={sample.is_thinking}"
             )
 
         root.after(12, _on_tick)

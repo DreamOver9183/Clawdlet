@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 import tkinter as tk
-from PIL import Image
+from PIL import Image, ImageChops
 
 from clawdlet.behavior import ClawdletController, WindowSnapshot
 from clawdlet.config import TrackerConfig
 from clawdlet.geometry import PixelMapper, Rect
 from clawdlet.overlay import ClawdletOverlay
 from clawdlet.physics import PhysicsBody
-from clawdlet.sprites import CHROMA_KEY_RGB, SpriteSheetBank
+from clawdlet.sprites import CHROMA_KEY_RGB, SpriteFrame, SpriteSheetBank
 from clawdlet.tools.gen_sprites import generate_all_sprites
 from clawdlet.window_tracker import Win32ClaudeTracker
+
+
+# Intentional jumps: typing hoists the laptop overhead (2..4), kick hops on the follow-through (4)
+DESIGNED_AIRBORNE_FRAMES = {"typing_laptop": (2, 3, 4), "kick_laptop": (4,)}
 
 
 def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> None:
@@ -57,8 +61,11 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
     ):
         strip_path = tmp_path / f"{grounded_anim}.png"
         with Image.open(strip_path) as img:
-            bottom_row_alphas = [img.getpixel((x, 63))[3] for x in range(64)]
-            assert max(bottom_row_alphas) == 255
+            for frame_idx in range(img.width // 64):
+                if frame_idx in DESIGNED_AIRBORNE_FRAMES.get(grounded_anim, ()):
+                    continue
+                bottom_row_alphas = [img.getpixel((frame_idx * 64 + x, 63))[3] for x in range(64)]
+                assert max(bottom_row_alphas) == 255, f"{grounded_anim} frame {frame_idx} floats"
 
 
 def test_sprite_bank_squash_and_flip_rendering(tmp_path: Path) -> None:
@@ -122,3 +129,75 @@ def test_app_short_run_lifecycle() -> None:
 
     rc = main(["--duration", "0.12", "--scale", "2", "--spawn", "center"])
     assert rc == 0
+
+
+BODY_RGB = (241, 91, 69)
+EYE_RGB = (10, 10, 10)
+
+
+def _frames(sprites_dir: Path, name: str) -> list[Image.Image]:
+    with Image.open(sprites_dir / f"{name}.png") as strip:
+        sheet = strip.convert("RGBA")
+    return [sheet.crop((i * 64, 0, (i + 1) * 64, 64)) for i in range(sheet.width // 64)]
+
+
+def _color_bbox(frame: Image.Image, rgb: tuple[int, int, int]) -> tuple[int, int, int, int]:
+    pts = [(x, y) for y in range(64) for x in range(64) if frame.getpixel((x, y)) == (*rgb, 255)]
+    assert pts, f"no pixels of {rgb}"
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _opaque_runs(frame: Image.Image, y: int) -> int:
+    runs = 0
+    inside = False
+    for x in range(64):
+        opaque = frame.getpixel((x, y))[3] >= 128
+        if opaque and not inside:
+            runs += 1
+        inside = opaque
+    return runs
+
+
+def test_polished_sprites_match_concept_doc_poses(tmp_path: Path) -> None:
+    generate_all_sprites(tmp_path)
+
+    # perch_look_down: lying flat and peeking down -> eyes sit in the lower half of the body
+    for frame in _frames(tmp_path, "perch_look_down"):
+        _, body_top, _, body_bottom = _color_bbox(frame, BODY_RGB)
+        _, eye_top, _, _ = _color_bbox(frame, EYE_RGB)
+        assert eye_top > (body_top + body_bottom) / 2.0
+
+    # dragged_struggle: stretched taller and narrower than the standing pose
+    idle0 = _frames(tmp_path, "idle_breathe")[0]
+    drag0 = _frames(tmp_path, "dragged_struggle")[0]
+    il, it, ir, ib = _color_bbox(idle0, BODY_RGB)
+    dl, dt, dr, db = _color_bbox(drag0, BODY_RGB)
+    assert db - dt > ib - it
+    assert dr - dl < ir - il
+
+    # idle_breathe: tentacles wiggle on frames 3 and 5, at least two legs always on the ground
+    idle = _frames(tmp_path, "idle_breathe")
+    legs0 = idle[0].crop((0, 56, 64, 64)).tobytes()
+    assert idle[3].crop((0, 56, 64, 64)).tobytes() != legs0
+    assert idle[5].crop((0, 56, 64, 64)).tobytes() != legs0
+    for frame in idle:
+        assert _opaque_runs(frame, 63) >= 2
+
+    # land_squish: every hand-drawn frame fits the canvas, so rendering at 1:1 clips nothing
+    for frame in _frames(tmp_path, "land_squish"):
+        left, _, right, _ = frame.getchannel("A").point(lambda a: 255 if a >= 128 else 0).getbbox()
+        assert left >= 1 and right - 1 <= 62
+        rendered = SpriteFrame(image=frame).render_with_squash(1.0, 1.0)
+        opaque = sum(frame.getchannel("A").histogram()[128:])
+        chroma_bg = Image.new("RGB", rendered.size, CHROMA_KEY_RGB)
+        drawn_mask = ImageChops.difference(rendered, chroma_bg).convert("L").point(lambda v: 255 if v else 0)
+        assert drawn_mask.histogram()[255] == opaque
+
+    # typing_laptop intro glides right from the idle pose: body_left 8 -> 10 -> 12 (x2 px)
+    typing = _frames(tmp_path, "typing_laptop")
+    for idx, expected_left in ((0, 16), (1, 20), (2, 24)):
+        _, eye_row, _, _ = _color_bbox(typing[idx], EYE_RGB)
+        row = [x for x in range(64) if typing[idx].getpixel((x, eye_row)) == (*BODY_RGB, 255)]
+        assert min(row) == expected_left

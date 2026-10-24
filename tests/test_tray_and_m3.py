@@ -9,7 +9,7 @@ import pytest
 import win32con
 import win32gui
 
-from clawdlet.app import dispatch_tray_action
+from clawdlet.app import dispatch_tray_action, sync_tray_state
 from clawdlet.behavior import ClawdletController, PetState, WindowSnapshot
 from clawdlet.config import ActivityMode
 from clawdlet.geometry import Rect
@@ -163,3 +163,17 @@ def test_win32_tray_icon_thread_lifecycle(tmp_path: Path) -> None:
     tray.start()
     assert tray._hwnd is not None
     tray.stop()
+
+
+def test_sync_tray_state_mirrors_controller_manual_typing() -> None:
+    body = PhysicsBody(x=500.0, y=688.0, width=128.0, height=128.0, grounded=True)
+    ctrl = ClawdletController(body=body, work_area=Rect(0.0, 0.0, 1536.0, 816.0))
+    tray_state = TrayMenuState()
+
+    ctrl.toggle_typing()  # e.g. double-click on the pet, not via the tray menu
+    sync_tray_state(tray_state, ctrl)
+    assert tray_state.manual_typing is True
+
+    ctrl.hop()  # right-click hop cancels typing
+    sync_tray_state(tray_state, ctrl)
+    assert tray_state.manual_typing is False
