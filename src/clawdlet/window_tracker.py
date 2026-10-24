@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import time
 
 import psutil
+import win32con
 import win32gui
 import win32process
 
@@ -120,6 +121,27 @@ def get_window_cloaked(hwnd: int) -> int:
     except Exception:
         pass
     return 0
+
+
+def is_window_maximized(hwnd: int) -> bool:
+    try:
+        return bool(ctypes.windll.user32.IsZoomed(wintypes.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def nudge_window(hwnd: int, dx: int) -> None:
+    """Move a top-level window horizontally by ``dx`` px without resizing, re-stacking or focusing it."""
+    if dx == 0 or not win32gui.IsWindow(hwnd) or is_window_maximized(hwnd):
+        return
+    left, top, _right, _bottom = win32gui.GetWindowRect(hwnd)
+    flags = (
+        win32con.SWP_NOSIZE
+        | win32con.SWP_NOZORDER
+        | win32con.SWP_NOACTIVATE
+        | win32con.SWP_NOOWNERZORDER
+    )
+    win32gui.SetWindowPos(hwnd, 0, left + int(dx), top, 0, 0, flags)
 
 
 def get_physical_work_area() -> Rect:
@@ -353,6 +375,7 @@ class Win32ClaudeTracker:
                             minimized=False,
                             visible=True,
                             is_thinking=thinking,
+                            maximized=is_window_maximized(self._locked_hwnd),
                         )
                 except Exception:
                     self._locked_hwnd = None
@@ -370,6 +393,7 @@ class Win32ClaudeTracker:
                     minimized=snap.minimized,
                     visible=snap.visible,
                     is_thinking=thinking,
+                    maximized=is_window_maximized(snap.hwnd),
                 )
             return None
 

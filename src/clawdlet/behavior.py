@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 import random
 
+from clawdlet.agent_events import AgentActivity, AgentEvent
 from clawdlet.config import (
     ACTIVITY_PROFILES,
     ActivityMode,
     ActivityProfile,
+    InteractionConfig,
     PhysicsConfig,
     TrackerConfig,
 )
 from clawdlet.geometry import Rect, Vec2
+from clawdlet.input_state import PointerSnapshot
 from clawdlet.physics import ImpactEvent, PhysicsBody, step_physics
+from clawdlet.window_push import (
+    PUSH_MAX_DISTANCE_PX,
+    PUSH_MAX_DURATION_S,
+    PUSH_SPEED_PX_S,
+    PushPlan,
+    plan_window_push,
+)
 
 
 class PetState(str, Enum):
@@ -34,13 +45,88 @@ class PetState(str, Enum):
     THROWN = "thrown"
     LAND_SQUISH = "land_squish"
     DIZZY = "dizzy"
+    # Milestone 5 interactions
+    CHASE_CURSOR = "chase_cursor"
+    POUNCE = "pounce"
+    POKED = "poked"
+    PETTED = "petted"
+    FLAIL = "flail"
+    YAWN = "yawn"
+    SLEEP = "sleep"
+    WAKE_STARTLE = "wake_startle"
+    PEEK_EDGE = "peek_edge"
+    CELEBRATE = "celebrate"
+    ERROR_SWEAT = "error_sweat"
+    ALERT = "alert"
+    PUSH_WINDOW = "push_window"
 
     @property
     def animation_name(self) -> str:
         # THROWN is a distinct FSM state (ends in DIZZY) but shares the free-fall sprite
         if self is PetState.THROWN:
             return PetState.FALLING.value
+        if self is PetState.CHASE_CURSOR:
+            return PetState.WANDER.value
         return self.value
+
+
+# Resting states that may doze off, pounce, or decide on a new activity
+_REST_STATES = frozenset({PetState.IDLE, PetState.BLOB, PetState.PERCH_CLAUDE})
+
+# Timer-driven reactions that stand still on the floor or on Claude Desktop's top border
+_STATIONARY_STATES = frozenset({
+    PetState.POUNCE,
+    PetState.POKED,
+    PetState.PETTED,
+    PetState.FLAIL,
+    PetState.YAWN,
+    PetState.SLEEP,
+    PetState.WAKE_STARTLE,
+    PetState.PEEK_EDGE,
+    PetState.CELEBRATE,
+    PetState.ERROR_SWEAT,
+    PetState.ALERT,
+})
+
+# States that Claude thinking / agent busy (and manual typing) may interrupt to pull out the laptop.
+# User reactions, ALERT, CELEBRATE, ERROR_SWEAT and PEEK_EDGE play out instead.
+_BUSY_INTERRUPTIBLE = frozenset({
+    PetState.IDLE,
+    PetState.BLOB,
+    PetState.WANDER,
+    PetState.PERCH_CLAUDE,
+    PetState.CHASE_CURSOR,
+    PetState.TYPING,
+    PetState.PUT_AWAY_LAPTOP,
+    PetState.KICK_LAPTOP,
+    PetState.YAWN,
+    PetState.SLEEP,
+    PetState.WAKE_STARTLE,
+    PetState.PUSH_WINDOW,
+})
+
+# States in which clicks, petting, and agent events are ignored (held, airborne, or mid-climb)
+_UNREACTIVE_STATES = frozenset({
+    PetState.DRAGGED,
+    PetState.FALLING,
+    PetState.THROWN,
+    PetState.LAND_SQUISH,
+    PetState.DIZZY,
+    PetState.CLIMB,
+    PetState.POUNCE,
+})
+
+_LAPTOP_STATES = frozenset({PetState.TYPING, PetState.PUT_AWAY_LAPTOP, PetState.KICK_LAPTOP})
+
+# States ticked by the "perched on Claude Desktop's top border" path while a window is locked
+_PERCH_TICK_STATES = frozenset({
+    PetState.PERCH_CLAUDE,
+    PetState.WANDER,
+    PetState.BLOB,
+    PetState.CHASE_CURSOR,
+    *_LAPTOP_STATES,
+    *_STATIONARY_STATES,
+})
 
 
 @dataclass(frozen=True)
@@ -52,6 +138,7 @@ class WindowSnapshot:
     minimized: bool = False
     visible: bool = True
     is_thinking: bool = False
+    maximized: bool = False
 
     @property
     def is_perchable(self) -> bool:
@@ -104,6 +191,7 @@ class RenderFrameState:
     locked_hwnd: int | None = None
     window_speed: float = 0.0
     projectile: ProjectileRenderState | None = None
+    frame_index: int | None = None  # Controller-chosen pose (e.g. gaze direction); None = time-based
 
 
 class ClawdletController:
@@ -115,6 +203,19 @@ class ClawdletController:
     KICK_LAPTOP_DURATION_S: float = 1.28
     KICK_RELEASE_S: float = 2.0 / 5.5     # kick_laptop frame 2 @ 5.5 FPS: laptop leaves the foot
     POINTER_HISTORY_WINDOW_S: float = 0.10
+    # Milestone 5 reaction timings
+    POUNCE_CROUCH_S: float = 0.35        # pounce: 3 frames @ 8.6 FPS
+    POUNCE_MAX_JUMP_VY: float = 1100.0   # ~252px apex at gravity 2400
+    POUNCE_MAX_VX: float = 900.0
+    POKED_DURATION_S: float = 0.60       # poked: 4 frames @ 6.6 FPS
+    PET_LINGER_S: float = 1.00           # PETTED keeps glowing this long after the last stroke
+    FLAIL_DURATION_S: float = 1.60
+    YAWN_DURATION_S: float = 1.20        # yawn: 6 frames @ 5 FPS
+    WAKE_DURATION_S: float = 0.60        # wake_startle: 4 frames @ 6.6 FPS
+    CELEBRATE_DURATION_S: float = 1.60   # celebrate: 8 frames @ 5 FPS
+    ERROR_SWEAT_DURATION_S: float = 1.40 # error_sweat: 6 frames @ 4.3 FPS
+    GAZE_BLINK_S: float = 0.12
+    CHASE_SPEED_MULT: float = 1.40       # Chasing the cursor is an excited trot
 
     def __init__(
         self,
@@ -124,11 +225,13 @@ class ClawdletController:
         tracker_cfg: TrackerConfig | None = None,
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         rng_seed: int | None = None,
+        interaction_cfg: InteractionConfig | None = None,
     ) -> None:
         self.body = body
         self.work_area = work_area
         self.physics_cfg = physics_cfg or PhysicsConfig()
         self.tracker_cfg = tracker_cfg or TrackerConfig()
+        self.interaction_cfg = interaction_cfg or InteractionConfig()
         self.activity_mode: ActivityMode = activity_mode
         self._rng = random.Random(rng_seed)
 
@@ -141,6 +244,10 @@ class ClawdletController:
         self.facing: int = 1  # +1 right, -1 left
         self.manual_typing: bool = False
         self._seeking_claude: bool = False
+        # Edge-peek mode (tray toggle): hide half-visible at the nearest screen edge
+        self.peek_mode: bool = False
+        self._peek_side: int = -1        # -1 left edge, +1 right edge
+        self._peek_seek_side: int = 0    # Side currently being walked to (0 = not seeking)
         self._climb_surface: str | None = None  # "claude_window" | "screen_wall" | None
         self._climb_wall_side: int = -1         # -1 left edge, +1 right edge
 
@@ -165,6 +272,31 @@ class ClawdletController:
         self._proj_vx: float = 0.0
         self._proj_vy: float = 0.0
         self._proj_elapsed_s: float = 0.0
+
+        # Global cursor & user-idle state (Milestone 5)
+        self._pointer: PointerSnapshot | None = None
+        self._cursor_still_s: float = 0.0
+        self._cursor_anchor: Vec2 | None = None
+        # Cosmetic randomness (blinks) uses its own stream so it never perturbs FSM decisions
+        self._fx_rng = random.Random(rng_seed)
+        self._gaze_blink_until: float = 0.0
+        self._gaze_next_blink_at: float = 0.0
+        self._pounce_ready_at: float = 0.0
+
+        # Claude Code hook activity (Milestone 5)
+        self.agent = AgentActivity(self.interaction_cfg.agent_busy_expiry_s)
+        self._alert_session: str | None = None
+        self._pending_celebrate: bool = False
+        self._last_win: WindowSnapshot | None = None
+
+        # Opt-in window pushing (Hyper only). The app injects the Win32 nudger; tests inject a fake.
+        self.push_window_enabled: bool = False
+        self.window_nudger: Callable[[int, int], None] | None = None
+        self._seeking_push: bool = False
+        self._push_plan: PushPlan | None = None
+        self._last_push_t: float | None = None
+        self._push_moved_px: int = 0
+        self._push_carry_px: float = 0.0
 
     @property
     def profile(self) -> ActivityProfile:
@@ -192,6 +324,14 @@ class ClawdletController:
 
     def set_work_area(self, work_area: Rect) -> None:
         self.work_area = work_area
+
+    def set_peek_mode(self, enabled: bool) -> None:
+        """Toggle edge-peek mode; turning it off pops the pet back out to idle."""
+        self.peek_mode = bool(enabled)
+        if not self.peek_mode:
+            self._peek_seek_side = 0
+            if self.state == PetState.PEEK_EDGE:
+                self._set_state(PetState.IDLE, 1.0)
 
     def set_activity_mode(self, mode: ActivityMode) -> None:
         """Switch between QUIET, NORMAL, and HYPER activity profiles."""
@@ -306,9 +446,72 @@ class ClawdletController:
             self._start_stop_typing()
         return self.manual_typing
 
+    def poke(self) -> bool:
+        """Single click: flinch (or wake up / acknowledge an alert). Return True if it reacted."""
+        if not self._can_react() or self.state in _LAPTOP_STATES:
+            return False
+        if self.state in (PetState.PETTED, PetState.FLAIL):
+            return False  # Stronger reactions keep playing
+        if self.state in (PetState.YAWN, PetState.SLEEP):
+            self._set_state(PetState.WAKE_STARTLE)
+            return True
+        self._alert_session = None
+        self._set_state(PetState.POKED)
+        return True
+
+    def flail(self) -> bool:
+        """Rapid clicks: throw a tantrum. Return True if it reacted."""
+        if not self._can_react() or self.state in _LAPTOP_STATES:
+            return False
+        self._alert_session = None
+        self._set_state(PetState.FLAIL)
+        return True
+
+    def pet(self) -> bool:
+        """Stroking: glow with hearts; repeated strokes keep it going. Return True if it reacted."""
+        if not self._can_react() or self.state in _LAPTOP_STATES:
+            return False
+        if self.state in (PetState.FLAIL, PetState.ALERT):
+            return False
+        if self.state == PetState.PETTED:
+            self._state_timer = 0.0
+            return True
+        self._set_state(PetState.PETTED)
+        return True
+
+    def handle_agent_event(self, event: AgentEvent, session_id: str) -> None:
+        """React to a Claude Code hook event (busy typing is picked up through ``_is_thinking``)."""
+        win = self._last_win
+        was_busy = self.agent.note(event, session_id, self._clock)
+
+        # Any follow-up from the session that raised the alert means it is no longer waiting
+        if event != AgentEvent.ATTENTION and session_id == self._alert_session:
+            self._alert_session = None
+            if self.state == PetState.ALERT:
+                self._return_to_rest(win)
+
+        if event == AgentEvent.ATTENTION:
+            if self._can_react():
+                self._alert_session = session_id
+                self._set_state(PetState.ALERT)
+        elif event in (AgentEvent.ERROR, AgentEvent.FAILED):
+            if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL):
+                self._set_state(PetState.ERROR_SWEAT, self.ERROR_SWEAT_DURATION_S)
+        elif event == AgentEvent.DONE and was_busy:
+            if self.state == PetState.TYPING and not self._is_thinking(win):
+                # Laptop away first (tuck or kick by mode), then the victory dance
+                self._start_stop_typing()
+                self._pending_celebrate = True
+            elif self._can_react() and self.state in _BUSY_INTERRUPTIBLE:
+                self._set_state(PetState.CELEBRATE)
+            else:
+                self._pending_celebrate = True
+
     def begin_drag(self, cursor_x: float, cursor_y: float) -> None:
         """Grab Clawdlet with the left mouse button."""
         self.manual_typing = False
+        self._seeking_push = False
+        self._push_plan = None
         self.state = PetState.DRAGGED
         self._state_timer = 0.0
         self._pending_dizzy = False
@@ -453,11 +656,338 @@ class ClawdletController:
         self._state_timer = 0.0
         self._decision_duration = 6.0
 
+    # --- Milestone 5: shared reaction plumbing --------------------------------------------------
+
+    def _is_thinking(self, win: WindowSnapshot | None) -> bool:
+        """Claude Desktop heuristic thinking (tracker) or a busy Claude Code session (hooks)."""
+        return bool(win is not None and win.is_thinking) or self.agent.busy(self._clock)
+
+    def _set_state(self, state: PetState, duration: float | None = None) -> None:
+        self.state = state
+        self._state_timer = 0.0
+        if duration is not None:
+            self._decision_duration = duration
+        if state in _STATIONARY_STATES:
+            self.body.vx = 0.0
+
+    def _return_to_rest(self, win: WindowSnapshot | None) -> None:
+        """End a reaction: perch again on Claude Desktop's top border, or idle on the floor."""
+        rest_mult = self.profile.rest_duration_multiplier
+        if self._perched_hwnd is not None and win is not None and win.is_perchable:
+            self._set_state(PetState.PERCH_CLAUDE, 2.0 * rest_mult)
+        else:
+            self._set_state(PetState.IDLE, 1.5 * rest_mult)
+
+    def _can_react(self) -> bool:
+        return self.body.grounded and self.state not in _UNREACTIVE_STATES
+
+    def _user_active(self) -> bool:
+        p = self._pointer
+        return p is not None and p.idle_s < self.interaction_cfg.wake_idle_s
+
+    def _maybe_start_idle_behavior(self, win: WindowSnapshot | None) -> bool:
+        """Per-tick checks from a resting state: doze off, or pounce at a resting cursor.
+
+        Return True when the state changed.
+        """
+        if self._should_sleep(win):
+            self._set_state(PetState.YAWN)
+            return True
+        if self._can_pounce():
+            p = self._pointer
+            assert p is not None
+            self.facing = 1 if p.x >= self.body.center_x else -1
+            self._set_state(PetState.POUNCE)
+            return True
+        return False
+
+    def _should_sleep(self, win: WindowSnapshot | None) -> bool:
+        p = self._pointer
+        return (
+            p is not None
+            and p.idle_s >= self.interaction_cfg.sleep_after_idle_s
+            and not self._is_thinking(win)
+        )
+
+    def _head_to_peek_edge(self) -> None:
+        """Walk to the nearest screen edge, or settle into PEEK_EDGE if already there."""
+        self._seeking_claude = False
+        side = -1 if self.body.center_x < self.work_area.center_x else 1
+        edge_x = self.work_area.left if side < 0 else self.work_area.right - self.body.width
+        if abs(self.body.x - edge_x) <= 2.0:
+            self.body.x = edge_x
+            self._peek_side = side
+            self._peek_seek_side = 0
+            self._set_state(PetState.PEEK_EDGE)
+            return
+        self._peek_seek_side = side
+        self.facing = side
+        self._set_state(PetState.WANDER, 30.0)
+
+    def _hop_off_perch(self, win: WindowSnapshot) -> None:
+        """Jump off the nearer end of Claude Desktop's top border (used when edge-peek is enabled)."""
+        side = -1 if self.body.center_x < win.rect.center_x else 1
+        self.facing = side
+        self._perched_hwnd = None
+        self.body.grounded = False
+        self.body.on_platform_id = None
+        self.body.vx = side * 420.0
+        self.body.vy = -520.0
+        self._pending_dizzy = False
+        self._set_state(PetState.FALLING)
+
+    def _plan_push(self, win: WindowSnapshot | None) -> PushPlan | None:
+        p = self._pointer
+        perchable = win is not None and win.is_perchable
+        return plan_window_push(
+            mode=self.activity_mode,
+            enabled=self.push_window_enabled and self.window_nudger is not None,
+            perched=self._perched_hwnd is not None,
+            win_rect=win.rect if perchable else None,
+            win_maximized=bool(win is not None and win.maximized),
+            body_x=self.body.x,
+            body_y=self.body.y,
+            body_w=self.body.width,
+            body_h=self.body.height,
+            work_area=self.work_area,
+            idle_s=None if p is None else p.idle_s,
+            last_push_t=self._last_push_t,
+            now=self._clock,
+        )
+
+    def _step_seek_push(self, dt: float, win: WindowSnapshot | None) -> None:
+        """Walk to the side of the window; start shoving on arrival, give up if conditions lapse."""
+        plan = self._plan_push(win)
+        if plan is None or self._state_timer >= self._decision_duration:
+            self._seeking_push = False
+            self.body.vx = 0.0
+            self._set_state(PetState.IDLE, 1.5)
+            return
+        diff = plan.stand_x - self.body.x
+        if abs(diff) <= max(4.0, self.effective_walk_speed * dt * 1.5):
+            self.body.x = plan.stand_x
+            self.body.vx = 0.0
+            self._seeking_push = False
+            self._push_plan = plan
+            self._last_push_t = self._clock
+            self._push_moved_px = 0
+            self._push_carry_px = 0.0
+            self.facing = plan.direction
+            self._set_state(PetState.PUSH_WINDOW)
+            return
+        self.facing = 1 if diff > 0 else -1
+        self.body.vx = float(self.facing) * self.effective_walk_speed
+
+    def _step_push_window(self, dt: float, win: WindowSnapshot | None) -> None:
+        """Shove the Claude window a few pixels; stop at once if anything looks off."""
+        plan = self._push_plan
+        p = self._pointer
+        self.body.vx = 0.0
+        if (
+            plan is None
+            or win is None
+            or not win.is_perchable
+            or win.maximized
+            or self.window_nudger is None
+            or not self.push_window_enabled
+            or p is None
+            or p.idle_s < 1.0  # The user touched the mouse or keyboard: back off immediately
+            or self._push_moved_px >= PUSH_MAX_DISTANCE_PX
+            or self._state_timer >= PUSH_MAX_DURATION_S
+        ):
+            self._push_plan = None
+            self._set_state(PetState.IDLE, 1.5 * self.profile.rest_duration_multiplier)
+            return
+        if plan.direction > 0:
+            edge_room = self.work_area.right - win.rect.right
+        else:
+            edge_room = win.rect.left - self.work_area.left
+        self._push_carry_px += PUSH_SPEED_PX_S * dt
+        step = int(min(self._push_carry_px, PUSH_MAX_DISTANCE_PX - self._push_moved_px, edge_room))
+        if step > 0:
+            self._push_carry_px -= step
+            self._push_moved_px += step
+            self.window_nudger(win.hwnd, plan.direction * step)
+        # Keep leaning on the side of the window as it slides away
+        self.body.x = (win.rect.left - self.body.width) if plan.direction > 0 else win.rect.right
+        self.body.x += plan.direction * max(0, step)
+
+    def _can_pounce(self) -> bool:
+        p = self._pointer
+        if p is None or not self.profile.pounce_enabled or self.peek_mode:
+            return False
+        if self._clock < self._pounce_ready_at:
+            return False
+        if self._cursor_still_s < self.interaction_cfg.pounce_still_s or p.idle_s >= 30.0:
+            return False
+        rise = self.body.y - p.y  # cursor height above the pet's head
+        return 40.0 <= rise <= 250.0 and abs(p.x - self.body.center_x) <= 300.0
+
+    def _launch_pounce(self, win: WindowSnapshot | None) -> None:
+        """Leave the crouch on a ballistic arc whose apex reaches the cursor."""
+        p = self._pointer
+        self._pounce_ready_at = self._clock + self.interaction_cfg.pounce_cooldown_s
+        if p is None:
+            self._return_to_rest(win)
+            return
+        g = self.physics_cfg.gravity
+        rise = max(0.0, self.body.center_y - p.y)
+        vy = -min(self.POUNCE_MAX_JUMP_VY, (2.0 * g * (rise + 20.0)) ** 0.5)
+        t_apex = max(0.15, -vy / g)
+        vx = max(-self.POUNCE_MAX_VX, min(self.POUNCE_MAX_VX, (p.x - self.body.center_x) / t_apex))
+        if abs(vx) > 1.0:
+            self.facing = 1 if vx > 0 else -1
+        self._perched_hwnd = None
+        self._climb_surface = None
+        self.body.grounded = False
+        self.body.on_platform_id = None
+        self.body.vx = vx
+        self.body.vy = vy
+        self._pending_dizzy = False
+        self._set_state(PetState.FALLING)
+
+    def _try_start_chase(self, win: WindowSnapshot | None, perched: bool) -> bool:
+        """At a rest decision, maybe trot toward a nearby cursor along the current surface."""
+        p = self._pointer
+        chance = self.profile.chase_chance
+        if p is None or chance <= 0.0 or self.peek_mode:
+            return False
+        dx = p.x - self.body.center_x
+        if abs(dx) > self.interaction_cfg.chase_radius or abs(dx) < self.body.width * 0.5:
+            return False
+        if perched:
+            if win is None or not (win.rect.left <= p.x <= win.rect.right):
+                return False
+        elif p.y > self.body.bottom:
+            return False  # Cursor is below the floor (e.g. on the taskbar)
+        if self._rng.random() >= chance:
+            return False
+        self.facing = 1 if dx > 0 else -1
+        self._set_state(PetState.CHASE_CURSOR, self.interaction_cfg.chase_timeout_s)
+        return True
+
+    def _step_perch_chase(self, dt: float, win: WindowSnapshot) -> None:
+        p = self._pointer
+        if p is None:
+            self._return_to_rest(win)
+            return
+        max_offset = max(0.0, win.rect.width - self.body.width)
+        target = max(0.0, min(max_offset, p.x - win.rect.left - self.body.width * 0.5))
+        diff = target - self._perch_offset_x
+        step = self.effective_walk_speed * self.CHASE_SPEED_MULT * dt
+        if abs(diff) <= step:
+            self._perch_offset_x = target
+            self._return_to_rest(win)
+            return
+        self.facing = 1 if diff > 0 else -1
+        self._perch_offset_x += self.facing * step
+        if self._state_timer >= self._decision_duration:
+            self._return_to_rest(win)
+
+    def _step_floor_chase(self, dt: float, win: WindowSnapshot | None) -> None:
+        p = self._pointer
+        if p is None:
+            self._return_to_rest(win)
+            return
+        target = self.work_area.clamp_x(p.x - self.body.width * 0.5, self.body.width)
+        diff = target - self.body.x
+        speed = self.effective_walk_speed * self.CHASE_SPEED_MULT
+        if abs(diff) <= max(4.0, speed * dt * 1.5):
+            self.body.vx = 0.0
+            self._return_to_rest(win)
+            return
+        self.facing = 1 if diff > 0 else -1
+        self.body.vx = float(self.facing) * speed
+
+    def _advance_reaction(self, win: WindowSnapshot | None) -> None:
+        """Advance timers and exits of the stationary reaction states."""
+        s = self.state
+        t = self._state_timer
+        timed = {
+            PetState.POKED: self.POKED_DURATION_S,
+            PetState.PETTED: self.PET_LINGER_S,
+            PetState.FLAIL: self.FLAIL_DURATION_S,
+            PetState.WAKE_STARTLE: self.WAKE_DURATION_S,
+            PetState.CELEBRATE: self.CELEBRATE_DURATION_S,
+            PetState.ERROR_SWEAT: self.ERROR_SWEAT_DURATION_S,
+        }
+        if s in timed:
+            if t >= timed[s]:
+                self._return_to_rest(win)
+        elif s == PetState.POUNCE:
+            if t >= self.POUNCE_CROUCH_S:
+                self._launch_pounce(win)
+        elif s == PetState.YAWN:
+            if self._user_active():
+                self._return_to_rest(win)
+            elif t >= self.YAWN_DURATION_S:
+                self._set_state(PetState.SLEEP)
+        elif s == PetState.SLEEP:
+            if self._user_active():
+                self._set_state(PetState.WAKE_STARTLE)
+        elif s == PetState.PEEK_EDGE:
+            if not self.peek_mode:
+                self._return_to_rest(win)
+        elif s == PetState.ALERT:
+            if t >= self.interaction_cfg.alert_timeout_s:
+                self._alert_session = None
+                self._return_to_rest(win)
+
+    def _cursor_near(self, margin: float) -> bool:
+        """True when the cursor is within ``margin`` px of the pet's bounding box."""
+        p = self._pointer
+        if p is None:
+            return False
+        dx = max(self.body.x - p.x, 0.0, p.x - self.body.right)
+        dy = max(self.body.y - p.y, 0.0, p.y - self.body.bottom)
+        return dx * dx + dy * dy <= margin * margin
+
+    def _gaze_frame(self, win: WindowSnapshot | None) -> int | None:
+        """Return the gaze pose index toward the cursor while resting, or None to keep the base animation."""
+        p = self._pointer
+        if p is None or self.state not in (PetState.IDLE, PetState.PERCH_CLAUDE):
+            return None
+        if self.state == PetState.PERCH_CLAUDE and win is not None and p.y >= win.rect.top:
+            return None  # Cursor is inside the Claude window: keep peeking down at the chat
+        eye_x = self.body.center_x
+        eye_y = self.body.y + self.body.height * 0.36
+        dx = p.x - eye_x
+        dy = p.y - eye_y
+        if dx * dx + dy * dy > self.interaction_cfg.gaze_radius ** 2:
+            return None
+        if self._gaze_next_blink_at <= 0.0:
+            self._gaze_next_blink_at = self._clock + self._fx_rng.uniform(3.0, 5.0)
+        elif self._clock >= self._gaze_next_blink_at:
+            self._gaze_blink_until = self._clock + self.GAZE_BLINK_S
+            self._gaze_next_blink_at = self._clock + self._fx_rng.uniform(3.0, 5.0)
+        if self._clock < self._gaze_blink_until:
+            return 9
+        dead_x = self.body.width * 0.35
+        dead_y = self.body.height * 0.35
+        qx = 0 if abs(dx) < dead_x or abs(dy) > 2.0 * abs(dx) else (1 if dx > 0 else -1)
+        qy = 0 if abs(dy) < dead_y or abs(dx) > 2.0 * abs(dy) else (1 if dy > 0 else -1)
+        return (qy + 1) * 3 + (qx + 1)
+
     def _transition_from_floor_rest(self, win: WindowSnapshot | None) -> None:
         """Choose next autonomous state when IDLE, BLOB, or TYPING timer expires on the floor."""
         if self.manual_typing:
             # Double-clicked again while putting the laptop away: pull it straight back out
             self._enter_manual_typing()
+            return
+        if self._pending_celebrate:
+            self._pending_celebrate = False
+            self._set_state(PetState.CELEBRATE)
+            return
+        if self.peek_mode:
+            self._head_to_peek_edge()
+            return
+        if self._plan_push(win) is not None:
+            self._seeking_push = True
+            self.state = PetState.WANDER
+            self._state_timer = 0.0
+            self._decision_duration = 10.0
+            return
+        if self._try_start_chase(win, perched=False):
             return
         rest_mult = self.profile.rest_duration_multiplier
         r = self._rng.random()
@@ -499,6 +1029,15 @@ class ClawdletController:
         """Choose next autonomous state while perched on Claude Desktop's top border."""
         if self.manual_typing:
             self._enter_manual_typing()
+            return
+        if self._pending_celebrate:
+            self._pending_celebrate = False
+            self._set_state(PetState.CELEBRATE)
+            return
+        if self.peek_mode:
+            self._hop_off_perch(win)
+            return
+        if self._try_start_chase(win, perched=True):
             return
         rest_mult = self.profile.rest_duration_multiplier
         roll = self._rng.random()
@@ -601,7 +1140,7 @@ class ClawdletController:
         win: WindowSnapshot | None,
         win_vel: Vec2,
     ) -> RenderFrameState | None:
-        """Handle states attached to Claude Desktop's top border (PERCH_CLAUDE, WANDER, BLOB, TYPING)."""
+        """Handle states attached to Claude Desktop's top border (rest, stroll, typing, and reactions)."""
         if win is None or not win.is_perchable:
             self._detach_to_fall()
             return None
@@ -609,16 +1148,19 @@ class ClawdletController:
             self._detach_by_shake(win_vel)
             return None
 
-        if win.is_thinking:
+        thinking = self._is_thinking(win)
+        if thinking and self.state in _BUSY_INTERRUPTIBLE:
             self.state = PetState.TYPING
             self._state_timer = 0.0
             self._decision_duration = 0.8
-        elif self.manual_typing and self.state not in (
-            PetState.TYPING,
-            PetState.PUT_AWAY_LAPTOP,
-            PetState.KICK_LAPTOP,
+        elif (
+            self.manual_typing
+            and self.state in _BUSY_INTERRUPTIBLE
+            and self.state not in _LAPTOP_STATES
         ):
             self._enter_manual_typing()
+        elif self.state == PetState.CHASE_CURSOR:
+            self._step_perch_chase(dt, win)
         elif self.state == PetState.WANDER:
             step_dx = float(self.facing) * (self.effective_walk_speed * 0.75) * dt
             self._perch_offset_x += step_dx
@@ -638,11 +1180,17 @@ class ClawdletController:
         self.body.grounded = True
         self.body.on_platform_id = "claude_window"
 
-        if not win.is_thinking and self._state_timer >= self._decision_duration:
+        if self.state in _STATIONARY_STATES:
+            self._advance_reaction(win)
+        elif self.state in _REST_STATES and self._maybe_start_idle_behavior(win):
+            pass
+        elif not thinking and self._state_timer >= self._decision_duration:
             if self.state == PetState.TYPING:
                 self._start_stop_typing()
             else:
                 self._transition_from_perch(win)
+        if self._perched_hwnd is None:
+            return None  # Launched off the border (pounce / hop): physics takes over this tick
 
         return self._build_render_state(win, win_vel)
 
@@ -684,10 +1232,30 @@ class ClawdletController:
 
         return self._build_render_state(win, win_vel)
 
-    def tick(self, dt: float, win: WindowSnapshot | None = None) -> RenderFrameState:
+    def _update_pointer(self, dt: float, pointer: PointerSnapshot | None) -> None:
+        # Stillness is measured against an anchor so slow drift still counts as movement
+        anchor = self._cursor_anchor
+        if pointer is None:
+            self._cursor_anchor = None
+            self._cursor_still_s = 0.0
+        elif anchor is None or abs(pointer.x - anchor.x) + abs(pointer.y - anchor.y) > 3.0:
+            self._cursor_anchor = Vec2(pointer.x, pointer.y)
+            self._cursor_still_s = 0.0
+        else:
+            self._cursor_still_s += dt
+        self._pointer = pointer
+
+    def tick(
+        self,
+        dt: float,
+        win: WindowSnapshot | None = None,
+        pointer: PointerSnapshot | None = None,
+    ) -> RenderFrameState:
         """Advance FSM and physics by ``dt`` seconds."""
         self._clock += dt
         self._state_timer += dt
+        self._update_pointer(dt, pointer)
+        self._last_win = win
         self._tick_projectile(dt)
 
         win_vel = self._update_window_velocity(dt, win)
@@ -702,14 +1270,7 @@ class ClawdletController:
             return self._tick_climb(dt, win, win_vel)
 
         # 3. Handle states perched on Claude Desktop's top border
-        if self._perched_hwnd is not None and self.state in (
-            PetState.PERCH_CLAUDE,
-            PetState.WANDER,
-            PetState.BLOB,
-            PetState.TYPING,
-            PetState.PUT_AWAY_LAPTOP,
-            PetState.KICK_LAPTOP,
-        ):
+        if self._perched_hwnd is not None and self.state in _PERCH_TICK_STATES:
             perched_render = self._tick_perched_on_claude(dt, win, win_vel)
             if perched_render is not None:
                 return perched_render
@@ -722,24 +1283,16 @@ class ClawdletController:
 
         # 3b. If grounded on floor and Claude is actively thinking (or manual typing just toggled), type!
         # Landing squish and dizzy always play out first.
-        claude_thinking = bool(win is not None and win.is_thinking)
-        if (
-            self.body.grounded
-            and self._perched_hwnd is None
-            and self.state not in (PetState.LAND_SQUISH, PetState.DIZZY)
-        ):
-            if claude_thinking:
+        on_floor = self.body.grounded and self._perched_hwnd is None
+        if on_floor and self.state in _BUSY_INTERRUPTIBLE:
+            if self._is_thinking(win):
                 self.body.vx = 0.0
                 self.body.vy = 0.0
                 self.state = PetState.TYPING
                 self._state_timer = 0.0
                 self._decision_duration = 0.8
                 return self._build_render_state(win, win_vel)
-            if self.manual_typing and self.state not in (
-                PetState.TYPING,
-                PetState.PUT_AWAY_LAPTOP,
-                PetState.KICK_LAPTOP,
-            ):
+            if self.manual_typing and self.state not in _LAPTOP_STATES:
                 self.body.vx = 0.0
                 self.body.vy = 0.0
                 self.state = PetState.TYPING
@@ -747,9 +1300,26 @@ class ClawdletController:
                 self._decision_duration = 6.0
                 return self._build_render_state(win, win_vel)
 
-        # 4. Handle floor WANDER horizontal velocity before physics integration
+        # 3c. Resting on the floor: maybe pounce at a resting cursor
+        if on_floor and self.state in _REST_STATES:
+            self._maybe_start_idle_behavior(win)
+
+        # 4. Handle floor WANDER / CHASE horizontal velocity before physics integration
         walk_spd = self.effective_walk_speed
-        if self.state == PetState.WANDER and self.body.grounded and self._perched_hwnd is None:
+        if on_floor and self.state in _STATIONARY_STATES:
+            self.body.vx = 0.0
+        if on_floor and self.state == PetState.CHASE_CURSOR:
+            self._step_floor_chase(dt, win)
+        if on_floor and self.state == PetState.WANDER and self._seeking_push:
+            self._step_seek_push(dt, win)
+        if on_floor and self.state == PetState.PUSH_WINDOW:
+            self._step_push_window(dt, win)
+        if (
+            self.state == PetState.WANDER
+            and self.body.grounded
+            and self._perched_hwnd is None
+            and not self._seeking_push
+        ):
             if self._seeking_claude and self._is_claude_climbable(win):
                 assert win is not None
                 target_x, wall_side = self._choose_claude_climb_x(win.rect)
@@ -822,12 +1392,21 @@ class ClawdletController:
                 self._pending_dizzy = False
                 self.state = PetState.DIZZY
                 self._state_timer = 0.0
+            elif self.state in _STATIONARY_STATES:
+                self._advance_reaction(win)
             elif self.body.on_platform_id == "claude_window" and win is not None and win.is_perchable:
                 self.state = PetState.PERCH_CLAUDE
                 self._perched_hwnd = win.hwnd
                 self._perch_offset_x = self.body.x - win.rect.left
                 self._state_timer = 0.0
                 self._decision_duration = self._rng.uniform(3.0, 5.5) * rest_mult
+            elif self.state == PetState.CHASE_CURSOR:
+                if self._state_timer >= self._decision_duration:
+                    self._return_to_rest(win)
+            elif self.state == PetState.PUSH_WINDOW or (
+                self.state == PetState.WANDER and self._seeking_push
+            ):
+                pass  # Advanced before the physics step
             elif self.state == PetState.WANDER:
                 at_left_wall = self.body.x <= self.work_area.left + 1.0 and self.facing < 0
                 at_right_wall = (
@@ -835,7 +1414,9 @@ class ClawdletController:
                 )
                 if at_left_wall or at_right_wall:
                     wall_side = -1 if at_left_wall else 1
-                    if self._rng.random() < self.effective_wall_climb_chance:
+                    if self.peek_mode and self._peek_seek_side == wall_side:
+                        self._head_to_peek_edge()
+                    elif not self.peek_mode and self._rng.random() < self.effective_wall_climb_chance:
                         self._start_climb_screen_wall(wall_side)
                     else:
                         self.facing = -wall_side
@@ -909,6 +1490,9 @@ class ClawdletController:
             flip_x = False
         else:
             flip_x = self.facing < 0
+        if self.state == PetState.PEEK_EDGE:
+            # Peek sprites hide at the left frame edge; mirror them for the right screen edge
+            flip_x = self._peek_side > 0
 
         proj_state: ProjectileRenderState | None = None
         if self._proj_active:
@@ -920,11 +1504,21 @@ class ClawdletController:
                 elapsed_s=self._proj_elapsed_s,
             )
 
+        animation_name = self.state.animation_name
+        if self.state == PetState.PEEK_EDGE and self._cursor_near(120.0):
+            animation_name = "peek_out"
+        frame_index = self._gaze_frame(win)
+        if frame_index is not None:
+            # Gaze poses are drawn facing the viewer; flipping would mirror the look direction
+            animation_name = "gaze"
+            flip_x = False
+
         return RenderFrameState(
             x=round(self.body.x),
             y=round(self.body.y),
             state=self.state,
-            animation_name=self.state.animation_name,
+            animation_name=animation_name,
+            frame_index=frame_index,
             scale_x=scale_x,
             scale_y=scale_y,
             flip_x=flip_x,

@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import ctypes
+import time
 import tkinter as tk
 from PIL import ImageTk
 import win32con
 import win32gui
 
 from clawdlet.behavior import ClawdletController, PetState, RenderFrameState
+from clawdlet.gestures import (
+    ClickGestureRecognizer,
+    Gesture,
+    PetStrokeDetector,
+    system_double_click_s,
+)
 from clawdlet.sprites import CHROMA_KEY_HEX, CHROMA_KEY_RGB, SpriteFrame, SpriteSheetBank
 
 
@@ -44,6 +51,11 @@ class ClawdletOverlay:
         self._proj_visible: bool = False
         self._proj_last_pos: tuple[int, int] | None = None
         self._proj_last_key: tuple[str, int, int] | None = None
+
+        # Mouse gestures: clicks/drags are settled by the recognizer, polled once per frame by the app
+        self._clicks = ClickGestureRecognizer(double_click_s=system_double_click_s())
+        self._strokes = PetStrokeDetector(min_travel_px=self.width * 0.6)
+        self._pending_gestures: list[Gesture] = []
 
         self._configure_window()
 
@@ -109,8 +121,9 @@ class ClawdletOverlay:
         self.canvas.bind("<ButtonPress-1>", self._on_left_press)
         self.canvas.bind("<B1-Motion>", self._on_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
-        self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<ButtonPress-3>", self._on_right_press)
+        self.canvas.bind("<Motion>", self._on_hover_motion)
+        self.canvas.bind("<Leave>", self._on_leave)
 
         # Configure secondary transparent projectile window (hidden until kicked laptop spawns)
         self._proj_win = tk.Toplevel(self.root)
@@ -138,6 +151,9 @@ class ClawdletOverlay:
     def set_click_through(self, enabled: bool) -> None:
         """Toggle WS_EX_TRANSPARENT on outer TkTopLevel so mouse clicks pass through."""
         self.click_through = bool(enabled)
+        self._clicks.reset()
+        self._strokes.reset()
+        self._pending_gestures.clear()
         try:
             hwnd = self.toplevel_hwnd
             ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
@@ -170,6 +186,7 @@ class ClawdletOverlay:
         self.width = self.sprite_bank.scaled_width
         self.height = self.sprite_bank.scaled_height
         self.controller.resize_body(float(self.width), float(self.height))
+        self._strokes.min_travel_px = self.width * 0.6
 
         self.canvas.configure(width=self.width, height=self.height)
         self.canvas.coords(self._debug_bg_item, 0, 0, self.width, 18)
@@ -190,7 +207,10 @@ class ClawdletOverlay:
         else:
             self._anim_elapsed_s += dt
 
-        frame = self.sprite_bank.get_frame(self._anim_name, self._anim_elapsed_s)
+        if state.frame_index is not None:
+            frame = self.sprite_bank.get_frame_index(self._anim_name, state.frame_index)
+        else:
+            frame = self.sprite_bank.get_frame(self._anim_name, self._anim_elapsed_s)
         self._current_frame = frame
 
         qx = round(state.scale_x * 50)
@@ -260,16 +280,32 @@ class ClawdletOverlay:
                 self._proj_last_pos = ppos
                 self._proj_win.geometry(f"{self.width}x{self.height}+{proj.x}+{proj.y}")
 
+    def poll_gestures(self, now: float) -> list[Gesture]:
+        """Return gestures completed since the last frame (settled clicks, combos, strokes)."""
+        gestures = self._pending_gestures
+        self._pending_gestures = []
+        settled = self._clicks.poll(now)
+        if settled is not None:
+            gestures.append(settled)
+        return gestures
+
     def _on_left_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if self.click_through:
             return
-        self.canvas.configure(cursor="fleur")
-        self.controller.begin_drag(float(event.x_root), float(event.y_root))
+        self._strokes.reset()
+        self._clicks.press(time.monotonic(), float(event.x_root), float(event.y_root))
 
     def _on_left_drag(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         if self.click_through:
             return
-        self.controller.update_drag(float(event.x_root), float(event.y_root))
+        x, y = float(event.x_root), float(event.y_root)
+        if self._clicks.motion(time.monotonic(), x, y) == Gesture.DRAG_START:
+            # Anchor the grab where the button went down so the pet doesn't jump under the cursor
+            self.canvas.configure(cursor="fleur")
+            self.controller.begin_drag(*self._clicks.press_point)
+        if not self._clicks.dragging:
+            return
+        self.controller.update_drag(x, y)
         nx = round(self.controller.body.x)
         ny = round(self.controller.body.y)
         if (nx, ny) != self._last_pos:
@@ -279,15 +315,22 @@ class ClawdletOverlay:
     def _on_left_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
         if self.click_through:
             return
-        self.canvas.configure(cursor="hand2")
-        self.controller.end_drag()
+        was_dragging = self._clicks.dragging
+        self._clicks.release(time.monotonic())
+        if was_dragging:
+            self.canvas.configure(cursor="hand2")
+            self.controller.end_drag()
+
+    def _on_hover_motion(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        if self._strokes.motion(time.monotonic(), float(event.x_root)):
+            self._pending_gestures.append(Gesture.PET)
+
+    def _on_leave(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        self._strokes.reset()
 
     def _on_right_press(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
         if self.click_through:
             return
         self.controller.hop(-650.0)
-
-    def _on_double_click(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
-        if self.click_through:
-            return
-        self.controller.toggle_typing()

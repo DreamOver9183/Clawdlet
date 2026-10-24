@@ -35,6 +35,30 @@ let clawd = new WindowCompanion({ gravity: true });
   - **Activity Modes**: `Quiet (安靜)` / `Normal (標準)` / `Hyper (過動)`
   - **Pixel-Art Scaling**: `1x (64px)` / `2x (128px)` / `3x (192px)` anchored at feet level
   - **Click-Through Lock (`WS_EX_TRANSPARENT`)**: 100% mouse click pass-through so it never blocks your workflow
+  - **Peek from Screen Edge / Allow Window Push / Copy Claude Code Hook Settings** (`邊緣躲藏／允許推視窗／複製 hook 設定`)
+
+### 5. Reacts to You | 對你有反應（v0.2.0）
+- **Cursor awareness (`游標感知`)**: Clawd's eyes follow your cursor while it rests, it sometimes trots over to stand under the cursor, and in Hyper mode it **pounces** at a cursor that sits still above its head.
+- **Touch & combos (`觸摸與連擊`)**: single-click to **poke**, rub the mouse back and forth over it to **pet** it (hearts!), click 3+ times fast for a **tantrum**.
+- **Sleep schedule (`作息與睡眠`)**: after 90 s without keyboard/mouse input it yawns and dozes off (`Zzz`); touch anything and it jolts awake.
+- **Peek from screen edge (`邊緣躲藏`)**: a tray toggle that makes Clawd hide half-visible at the nearest screen edge and lean out to wave when your cursor comes close.
+
+### 6. Claude Code Hooks | Claude Code 連動（v0.2.0）
+Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://code.claude.com/docs/en/hooks) and reacts to what your agent is doing:
+
+| Hook event | Clawdlet reaction | 反應 |
+| :--- | :--- | :--- |
+| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `SubagentStart` | Laptop out, typing | 掏筆電打字 |
+| `Stop` | Laptop away (tuck or kick), then a **victory dance** | 收／踢筆電後慶祝 |
+| `PostToolUseFailure` / `StopFailure` | Nervous **sweat** | 冒冷汗 |
+| `Notification` (permission / input needed) | Bobbing golden **`!`** until you respond or click Clawd | 頭上跳「!」 |
+
+Setup | 設定方式:
+1. Start Clawdlet once (it creates a private token at `%APPDATA%\Clawdlet\hook_token`).
+2. Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)**, or run `clawdlet --print-hook-config`.
+3. Merge the printed `hooks` block into `~/.claude/settings.json`.
+
+The receiver only binds to localhost, requires the bearer token, reads nothing but `hook_event_name` and `session_id`, never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
 
 ---
 
@@ -65,7 +89,12 @@ clawdlet --scale 2 --spawn claude          # Spawn above Claude Desktop at 2x (1
 clawdlet --mode hyper                      # Start directly in Hyper Mode (過動模式)
 clawdlet --click-through                   # Start with mouse click-through lock enabled
 clawdlet --debug                           # Show live state & HWND debug banner
+clawdlet --print-hook-config               # Print the Claude Code hooks block for ~/.claude/settings.json
+clawdlet --hook-port 47821                 # Port for the Claude Code hook receiver (default 47821)
+clawdlet --no-hooks                        # Don't start the hook receiver
+clawdlet --allow-window-push               # Hyper mode may nudge the Claude window a few px (off by default)
 clawdlet-dump-windows                      # Diagnostic tool to inspect detected Claude.exe HWNDs
+python -m clawdlet.tools.send_hook_event Stop   # Dev: send a fake hook event to a running Clawdlet
 ```
 
 ### Build Standalone `clawdlet.exe` | 打包單一執行檔
@@ -82,11 +111,18 @@ python -m clawdlet.tools.build_exe
 
 | Input | Action | 操作說明 |
 | :--- | :--- | :--- |
-| **Left-Click + Drag** | Pick up & throw | 左鍵按住拎起掙扎，甩動放開可依滑鼠軌跡拋飛（高速落地會眼冒金星暈眩） |
-| **Double Left-Click** | Toggle Laptop Typing | 左鍵雙擊切換「掏筆電重摔打字」，再次雙擊（或 6 秒後）觸發收筆電／踢飛筆電 |
+| **Left-Click + Drag** | Pick up & throw | 左鍵按住並移動超過 4px 即拎起掙扎，甩動放開可依滑鼠軌跡拋飛（高速落地會眼冒金星暈眩） |
+| **Single Left-Click** | Poke | 單擊戳一下（睡著時會嚇醒；頭上有「!」時代表已讀） |
+| **Double Left-Click** | Toggle Laptop Typing | 左鍵雙擊切換「掏筆電重摔打字」，再次雙擊（或 6 秒後）觸發收筆電／踢飛筆電。單擊／雙擊要等系統雙擊間隔（最多 0.5 秒）結束才判定 |
+| **3+ Rapid Clicks** | Tantrum | 連點三下以上會抓狂跺腳 |
+| **Rub Mouse Over Pet** | Pet | 不按鍵、滑鼠在身上左右來回摩擦就是撫摸，會冒愛心 |
+| **Move Cursor Nearby** | Gaze / Chase / Pounce | 眼睛追著游標看、偶爾走到游標下方；過動模式下游標停在頭上方會撲上去 |
 | **Right-Click on Pet** | Playful Hop | 右鍵點擊角色觸發原地開心跳躍 |
+| **Leave the PC (90 s)** | Sleep | 90 秒沒碰鍵盤滑鼠就打哈欠睡著，一動就驚醒 |
 | **Double-Click Tray Icon** | Summon to Center | 左鍵雙擊右下角系統匣圖示，立即將 Clawdlet 召喚回螢幕中央 |
-| **Right-Click Tray Icon** | Open Control Menu | 右鍵點擊系統匣圖示，切換「安靜／標準／過動模式」、「1x/2x/3x 縮放」與「穿透鎖定」 |
+| **Right-Click Tray Icon** | Open Control Menu | 右鍵點擊系統匣圖示，切換「安靜／標準／過動模式」、「1x/2x/3x 縮放」、「穿透鎖定」、「邊緣躲藏」、「允許推視窗」與「複製 hook 設定」 |
+
+**Allow Window Push (`允許推視窗`)** is off by default. When you turn it on, Hyper mode may — at most once every 15 minutes, only after you've been idle for 20 s, and never on a maximized window — walk up to the Claude window and shove it up to 36 px sideways (staying fully on screen). Any input stops it instantly.
 
 ---
 

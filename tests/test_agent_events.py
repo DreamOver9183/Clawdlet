@@ -1,0 +1,304 @@
+"""Milestone 5 step D: Claude Code hook mapping, localhost receiver, and agent-driven reactions."""
+
+from __future__ import annotations
+
+import http.client
+import json
+from pathlib import Path
+import queue
+
+import pytest
+
+from clawdlet.agent_events import (
+    DEFAULT_HOOK_EVENTS,
+    HARD_MAX_BODY_BYTES,
+    MAX_BODY_BYTES,
+    AgentActivity,
+    AgentEvent,
+    HookServer,
+    build_hook_settings,
+    load_or_create_token,
+    map_hook_payload,
+    scan_payload_head,
+)
+from clawdlet.behavior import ClawdletController, PetState, WindowSnapshot
+from clawdlet.config import ActivityMode
+from clawdlet.geometry import Rect
+from clawdlet.physics import PhysicsBody
+from clawdlet.tools.send_hook_event import send_hook_event
+
+DT = 1.0 / 60.0
+WORK_AREA = Rect(0.0, 0.0, 1536.0, 816.0)
+TOKEN = "test-token-not-secret"
+
+
+# --- Mapping & activity ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "event"),
+    [
+        ("UserPromptSubmit", AgentEvent.BUSY),
+        ("PreToolUse", AgentEvent.BUSY),
+        ("PostToolUse", AgentEvent.BUSY),
+        ("SubagentStart", AgentEvent.BUSY),
+        ("PostToolUseFailure", AgentEvent.ERROR),
+        ("Notification", AgentEvent.ATTENTION),
+        ("PermissionRequest", AgentEvent.ATTENTION),
+        ("Stop", AgentEvent.DONE),
+        ("StopFailure", AgentEvent.FAILED),
+        ("SessionEnd", AgentEvent.END),
+    ],
+)
+def test_map_hook_payload_known_events(name: str, event: AgentEvent) -> None:
+    assert map_hook_payload({"hook_event_name": name, "session_id": "s1"}) == (event, "s1")
+
+
+def test_map_hook_payload_rejects_unknown_and_malformed() -> None:
+    assert map_hook_payload({"hook_event_name": "PreCompact"}) is None
+    assert map_hook_payload({"hook_event_name": 42}) is None
+    assert map_hook_payload(["Stop"]) is None
+    assert map_hook_payload({"hook_event_name": "Stop"}) == (AgentEvent.DONE, "default")
+
+
+def test_agent_activity_busy_lifecycle_and_expiry() -> None:
+    act = AgentActivity(busy_expiry_s=180.0)
+    assert act.busy(0.0) is False
+    assert act.note(AgentEvent.BUSY, "a", 0.0) is False
+    assert act.busy(10.0) is True
+    act.note(AgentEvent.BUSY, "b", 20.0)
+    assert act.note(AgentEvent.DONE, "a", 30.0) is True
+    assert act.busy(30.0) is True  # session b still working
+    assert act.busy(201.0) is False  # b silent for > 180 s
+    act.note(AgentEvent.BUSY, "c", 300.0)
+    act.note(AgentEvent.FAILED, "c", 301.0)
+    assert act.busy(301.0) is False
+
+
+def test_hook_settings_snippet_shape() -> None:
+    settings = build_hook_settings(47821, TOKEN)["hooks"]
+    assert tuple(settings) == DEFAULT_HOOK_EVENTS
+    assert "PermissionRequest" not in settings
+    handler = settings["Stop"][0]["hooks"][0]
+    assert handler == {
+        "type": "http",
+        "url": "http://127.0.0.1:47821/hook",
+        "timeout": 2,
+        "headers": {"Authorization": f"Bearer {TOKEN}"},
+    }
+    assert settings["PreToolUse"][0]["matcher"] == "*"
+    assert "matcher" not in settings["Stop"][0]
+
+
+def test_token_is_created_once_and_reused(tmp_path: Path) -> None:
+    path = tmp_path / "Clawdlet" / "hook_token"
+    first = load_or_create_token(path)
+    assert len(first) >= 24
+    assert load_or_create_token(path) == first
+
+
+# --- HTTP receiver ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def server():
+    events: queue.Queue = queue.Queue()
+    srv = HookServer(token=TOKEN, events=events, port=0)
+    assert srv.start()
+    yield srv, events
+    srv.stop()
+
+
+def _post(port: int, body: bytes, token: str | None = TOKEN, path: str = "/hook",
+          length: int | None = None) -> int:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    conn.putrequest("POST", path)
+    if token is not None:
+        conn.putheader("Authorization", f"Bearer {token}")
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Content-Length", str(len(body) if length is None else length))
+    conn.endheaders()
+    conn.send(body)
+    status = conn.getresponse().status
+    conn.close()
+    return status
+
+
+def test_server_accepts_authorized_event(server) -> None:
+    srv, events = server
+    body = json.dumps({"hook_event_name": "Stop", "session_id": "s9", "tool_input": {"x": 1}}).encode()
+    assert _post(srv.port, body) == 200
+    assert events.get(timeout=2) == (AgentEvent.DONE, "s9")
+
+
+def test_server_ignores_unknown_events_with_200(server) -> None:
+    srv, events = server
+    assert _post(srv.port, b'{"hook_event_name": "PreCompact"}') == 200
+    assert events.empty()
+
+
+def test_server_rejects_bad_requests(server) -> None:
+    srv, events = server
+    assert _post(srv.port, b'{"hook_event_name": "Stop"}', token=None) == 401
+    assert _post(srv.port, b'{"hook_event_name": "Stop"}', token="wrong") == 401
+    # Declared size beyond the hard cap: rejected before any body byte is read
+    assert _post(srv.port, b"", length=HARD_MAX_BODY_BYTES + 1) == 413
+    assert _post(srv.port, b"not json") == 400
+    assert _post(srv.port, b"[1, 2]") == 400
+    assert _post(srv.port, b'{"hook_event_name": "Stop"}', path="/other") == 404
+    conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=3)
+    conn.request("GET", "/hook")
+    assert conn.getresponse().status == 405
+    conn.close()
+    assert events.empty()
+
+
+def test_oversized_tool_payload_is_drained_and_still_mapped(server) -> None:
+    srv, events = server
+    payload = {
+        "session_id": "big",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "x" * (MAX_BODY_BYTES * 3)},
+    }
+    assert _post(srv.port, json.dumps(payload).encode()) == 200
+    assert events.get(timeout=2) == (AgentEvent.BUSY, "big")
+
+
+def test_scan_payload_head_extracts_common_fields() -> None:
+    head = b'{"session_id": "abc-1", "hook_event_name":"Stop", "cwd": "C:/x"'
+    assert scan_payload_head(head) == {"session_id": "abc-1", "hook_event_name": "Stop"}
+    assert scan_payload_head(b'{"tool_input": "nothing here"') == {}
+
+
+def test_second_server_on_same_port_fails_gracefully(server) -> None:
+    srv, _ = server
+    other = HookServer(token=TOKEN, events=queue.Queue(), port=srv.port)
+    assert other.start() is False
+    assert other.running is False
+
+
+def test_send_hook_event_tool_round_trip(server) -> None:
+    srv, events = server
+    assert send_hook_event("Notification", srv.port, TOKEN, "dev") == 200
+    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev")
+    assert send_hook_event("Stop", srv.port, "bad", "dev") == 401
+
+
+# --- Controller reactions --------------------------------------------------------------------------
+
+
+def _floor(mode: ActivityMode = ActivityMode.NORMAL) -> ClawdletController:
+    body = PhysicsBody(x=500.0, y=WORK_AREA.bottom - 128.0, width=128.0, height=128.0, grounded=True)
+    ctrl = ClawdletController(body=body, work_area=WORK_AREA, activity_mode=mode, rng_seed=5)
+    ctrl.state = PetState.IDLE
+    ctrl._decision_duration = 999.0
+    return ctrl
+
+
+def _run(ctrl: ClawdletController, seconds: float, win: WindowSnapshot | None = None) -> list[PetState]:
+    return [ctrl.tick(DT, win).state for _ in range(int(round(seconds / DT)))]
+
+
+def test_busy_session_types_then_done_puts_laptop_away_and_celebrates() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")
+    assert _run(ctrl, 0.5)[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.DONE, "s")
+    states = _run(ctrl, ClawdletController.PUT_AWAY_DURATION_S + ClawdletController.CELEBRATE_DURATION_S + 0.5)
+    put_away = states.index(PetState.PUT_AWAY_LAPTOP)
+    celebrate = states.index(PetState.CELEBRATE)
+    assert put_away < celebrate
+    assert PetState.TYPING not in states[put_away:]
+    assert states[-1] == PetState.IDLE
+
+
+def test_hyper_done_kicks_laptop_before_celebrating() -> None:
+    ctrl = _floor(ActivityMode.HYPER)
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")
+    _run(ctrl, 0.3)
+    ctrl.handle_agent_event(AgentEvent.DONE, "s")
+    states = _run(ctrl, 3.5)
+    assert states.index(PetState.KICK_LAPTOP) < states.index(PetState.CELEBRATE)
+
+
+def test_done_without_prior_busy_does_not_celebrate() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.DONE, "s")
+    assert PetState.CELEBRATE not in _run(ctrl, 3.0)
+
+
+def test_done_while_another_session_is_busy_celebrates_then_keeps_typing() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "a")
+    ctrl.handle_agent_event(AgentEvent.BUSY, "b")
+    _run(ctrl, 0.3)
+    ctrl.handle_agent_event(AgentEvent.DONE, "a")
+    states = _run(ctrl, ClawdletController.CELEBRATE_DURATION_S + 0.3)
+    assert states[0] == PetState.CELEBRATE
+    assert states[-1] == PetState.TYPING
+
+
+def test_tool_failure_sweats_then_resumes_typing() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")
+    _run(ctrl, 0.3)
+    ctrl.handle_agent_event(AgentEvent.ERROR, "s")
+    states = _run(ctrl, ClawdletController.ERROR_SWEAT_DURATION_S + 0.3)
+    assert states[0] == PetState.ERROR_SWEAT
+    assert states.count(PetState.ERROR_SWEAT) == pytest.approx(ClawdletController.ERROR_SWEAT_DURATION_S / DT, abs=2)
+    assert states[-1] == PetState.TYPING
+
+
+def test_attention_alert_cleared_by_click_followup_or_timeout() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    assert ctrl.state == PetState.ALERT
+    assert ctrl.poke() is True
+    assert ctrl.state == PetState.POKED
+
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    _run(ctrl, 1.0)
+    assert ctrl.state == PetState.ALERT
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")  # user approved: Claude continues
+    assert _run(ctrl, 0.3)[-1] == PetState.TYPING
+
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    ctrl.handle_agent_event(AgentEvent.BUSY, "other")  # another session does not clear it
+    states = _run(ctrl, ctrl.interaction_cfg.alert_timeout_s - 0.5)
+    assert set(states) == {PetState.ALERT}
+    assert _run(ctrl, 1.0)[-1] == PetState.TYPING  # timed out, "other" still busy
+
+
+def test_attention_wakes_sleeping_pet_and_pops_out_of_peek() -> None:
+    ctrl = _floor()
+    ctrl._set_state(PetState.SLEEP)
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    assert ctrl.state == PetState.ALERT
+
+    ctrl = _floor()
+    ctrl.body.x = WORK_AREA.left
+    ctrl.set_peek_mode(True)
+    ctrl._head_to_peek_edge()
+    assert ctrl.state == PetState.PEEK_EDGE
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    assert ctrl.state == PetState.ALERT
+
+
+def test_busy_expires_after_silence() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")
+    assert _run(ctrl, 1.0)[-1] == PetState.TYPING
+    ctrl._clock += ctrl.interaction_cfg.agent_busy_expiry_s  # 3 minutes without hook events
+    assert PetState.PUT_AWAY_LAPTOP in _run(ctrl, 2.0)
+
+
+def test_agent_events_ignored_while_airborne() -> None:
+    ctrl = _floor()
+    ctrl.hop()
+    ctrl.tick(DT, None)
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
+    ctrl.handle_agent_event(AgentEvent.ERROR, "s")
+    assert ctrl.state == PetState.FALLING

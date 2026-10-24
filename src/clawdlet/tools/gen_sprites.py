@@ -29,6 +29,12 @@ SMOKE_LIGHT = (152, 156, 170, 255)    # Billowing light gray smoke puff
 SMOKE_DARK = (78, 82, 96, 255)        # Dark charcoal smoke & scorched soot
 ELECTRIC_CYAN = (102, 228, 255, 255)  # Short-circuit electric lightning sparks
 
+# Milestone 5 reaction effect palette
+HEART_PINK = (255, 112, 150, 255)     # Petting hearts
+SWEAT_BLUE = (120, 196, 255, 255)     # Error sweat drop
+ZZZ_WHITE = (232, 238, 255, 255)      # Sleeping Zzz letters
+ANGER_RED = (214, 34, 40, 255)        # Flail anger vein mark
+
 # 32x32 grid scaled 2x -> 64x64 base sprite.
 # In docs/clawd.png, Clawd is an exact 12-unit wide x 8-unit tall geometric figure.
 # Here 1 Clawd unit = 2x2 grid cells (4x4 px), giving exact proportions plus half-unit animation steps!
@@ -1219,6 +1225,432 @@ def _build_dizzy() -> list[Image.Image]:
     return frames
 
 
+# --- Milestone 5 interaction sprites ---------------------------------------------------------------
+
+
+def _draw_heart(grid: list[list[tuple[int, int, int, int]]], x: int, y: int) -> None:
+    """5x4 pixel heart with its top-left corner at (x, y)."""
+    for dx in (1, 3):
+        _px(grid, x + dx, y, HEART_PINK)
+    _rect(grid, x, y + 1, 5, 1, HEART_PINK)
+    _rect(grid, x + 1, y + 2, 3, 1, HEART_PINK)
+    _px(grid, x + 2, y + 3, HEART_PINK)
+
+
+def _draw_z(grid: list[list[tuple[int, int, int, int]]], x: int, y: int, size: int = 3) -> None:
+    """Small 'Z' letter (size x size) for the sleep animation."""
+    _rect(grid, x, y, size, 1, ZZZ_WHITE)
+    for i in range(1, size - 1):
+        _px(grid, x + size - 1 - i, y + i, ZZZ_WHITE)
+    _rect(grid, x, y + size - 1, size, 1, ZZZ_WHITE)
+
+
+def _draw_bang(grid: list[list[tuple[int, int, int, int]]], x: int, y: int) -> None:
+    """2-cell wide golden '!' (5-cell bar, 1-cell gap, 2-cell dot)."""
+    _rect(grid, x, y, 2, 5, STAR_GOLD)
+    _rect(grid, x, y + 6, 2, 2, STAR_GOLD)
+
+
+def _build_gaze() -> list[Image.Image]:
+    """10 controller-indexed poses: frames 0-8 look in a 3x3 grid ((dy+1)*3+(dx+1)), frame 9 blinks."""
+    frames: list[Image.Image] = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            g = _new_grid()
+            # Arms dip slightly on the side the gaze turns away from, a hint of body lean
+            _draw_canonical_clawd(
+                g,
+                left_arm_dy=4 + (1 if dx > 0 else 0),
+                right_arm_dy=4 + (1 if dx < 0 else 0),
+                eye_dx=dx,
+                eye_dy=dy,
+            )
+            frames.append(_grid_to_image(g))
+    g = _new_grid()
+    _draw_canonical_clawd(g, eye_mode="blink")
+    frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_pounce() -> list[Image.Image]:
+    """3-frame crouch wind-up before leaping at the cursor: sink low, wiggle, spring up."""
+    frames: list[Image.Image] = []
+    # (body_left, body_top, body_width, body_height, arm_dy, eye_mode)
+    specs = [
+        (7, 19, 18, 9, 5, "normal"),
+        (6, 21, 20, 8, 6, "squint"),
+        (9, 14, 14, 14, 1, "normal"),
+    ]
+    for b_left, b_top, b_w, b_h, arm_dy, eyes in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=b_top,
+            body_width=b_w,
+            body_height=b_h,
+            left_arm_dy=arm_dy,
+            right_arm_dy=arm_dy,
+            eye_mode=eyes,
+            eye_dy=-1,
+        )
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_poked() -> list[Image.Image]:
+    """4-frame flinch when single-clicked: squish away from the poke with a spark, then settle."""
+    frames: list[Image.Image] = []
+    # (body_left, body_top, body_width, body_height, l_arm, r_arm, eye_mode, spark)
+    specs = [
+        (9, 18, 15, 10, 1, 2, "blink", True),
+        (9, 17, 15, 11, 2, 3, "squint", False),
+        (8, 16, 16, 12, 3, 4, "normal", False),
+        (8, 16, 16, 12, 4, 4, "normal", False),
+    ]
+    for b_left, b_top, b_w, b_h, l_arm, r_arm, eyes, spark in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=b_top,
+            body_width=b_w,
+            body_height=b_h,
+            left_arm_dy=l_arm,
+            right_arm_dy=r_arm,
+            eye_mode=eyes,
+        )
+        if spark:
+            for sx, sy in ((5, 12), (7, 11), (6, 14)):
+                _px(g, sx, sy, STAR_GOLD)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_petted() -> list[Image.Image]:
+    """8-frame happy squint while being stroked: gentle sway with two hearts drifting up."""
+    frames: list[Image.Image] = []
+    # (body_left, body_top, arm_dy, heart A (x, y) or None, heart B (x, y) or None)
+    specs = [
+        (8, 17, 4, (19, 10), None),
+        (9, 17, 3, (19, 8), None),
+        (9, 16, 3, (20, 6), (6, 11)),
+        (8, 16, 4, (20, 4), (6, 9)),
+        (7, 17, 4, (21, 2), (5, 7)),
+        (7, 17, 5, None, (5, 5)),
+        (8, 16, 4, (19, 11), (6, 3)),
+        (8, 17, 4, (19, 9), None),
+    ]
+    for b_left, b_top, arm_dy, heart_a, heart_b in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=b_top,
+            body_height=28 - b_top,
+            left_arm_dy=arm_dy,
+            right_arm_dy=arm_dy,
+            eye_mode="squint",
+            eye_dy=1,
+        )
+        for heart in (heart_a, heart_b):
+            if heart is not None:
+                _draw_heart(g, heart[0], heart[1])
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_flail() -> list[Image.Image]:
+    """6-frame tantrum after rapid clicks: arms windmill, legs stamp, angry vein mark pulses."""
+    frames: list[Image.Image] = []
+    # (body_top, l_arm, r_arm, leg_bottoms, vein)
+    specs = [
+        (15, 1, 6, (31, 29, 31, 30), True),
+        (16, 6, 1, (30, 31, 29, 31), False),
+        (15, 1, 5, (31, 30, 31, 29), True),
+        (16, 5, 1, (29, 31, 30, 31), False),
+        (15, 1, 1, (31, 31, 29, 31), True),
+        (16, 6, 6, (31, 29, 31, 31), False),
+    ]
+    for b_top, l_arm, r_arm, l_bots, vein in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_top=b_top,
+            body_height=28 - b_top,
+            left_arm_dy=l_arm,
+            right_arm_dy=r_arm,
+            leg_bottoms=l_bots,
+            eye_mode="squint",
+        )
+        if vein:
+            for vx, vy in ((24, 11), (26, 11), (25, 10), (25, 12)):
+                _px(g, vx, vy, ANGER_RED)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_yawn() -> list[Image.Image]:
+    """6-frame big yawn & stretch that settles into the low sleeping loaf."""
+    frames: list[Image.Image] = []
+    # (body_left, body_top, body_width, body_height, arm_dy, eye_mode, eye_dy, mouth_h)
+    specs = [
+        (8, 16, 16, 12, 4, "normal", 0, 0),
+        (8, 15, 16, 13, 2, "squint", 0, 1),
+        (9, 13, 14, 15, 1, "blink", 0, 2),
+        (9, 13, 14, 15, 1, "blink", 0, 3),
+        (8, 17, 16, 11, 4, "blink", 1, 1),
+        (7, 20, 18, 10, 4, "squint", 1, 0),
+    ]
+    for b_left, b_top, b_w, b_h, arm_dy, eyes, edy, mouth_h in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=b_top,
+            body_width=b_w,
+            body_height=b_h,
+            left_arm_dy=arm_dy,
+            right_arm_dy=arm_dy,
+            eye_mode=eyes,
+            eye_dy=edy,
+        )
+        if mouth_h:
+            _rect(g, b_left + b_w // 2 - 2, b_top + 6, 4, mouth_h, EYE_COLOR)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_sleep() -> list[Image.Image]:
+    """8-frame sleeping loaf: slow breathing with closed eyes while Zzz letters float up and away."""
+    frames: list[Image.Image] = []
+    # (body_top, body_height, small z (x, y) or None, big z (x, y) or None)
+    specs = [
+        (20, 10, (23, 14), None),
+        (20, 10, (24, 12), None),
+        (21, 9, (25, 10), (19, 14)),
+        (21, 9, (26, 8), (20, 11)),
+        (21, 9, None, (21, 8)),
+        (20, 10, None, (22, 5)),
+        (20, 10, (23, 15), (23, 2)),
+        (20, 10, (23, 14), None),
+    ]
+    for b_top, b_h, small_z, big_z in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=7,
+            body_top=b_top,
+            body_width=18,
+            body_height=b_h,
+            left_arm_dy=4,
+            right_arm_dy=4,
+            eye_mode="blink",
+            eye_dy=1,
+        )
+        if small_z is not None:
+            _draw_z(g, small_z[0], small_z[1], size=4)
+        if big_z is not None:
+            _draw_z(g, big_z[0], big_z[1], size=5)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_wake_startle() -> list[Image.Image]:
+    """4-frame startled wake-up: shoot upright wide-eyed with a '!' then shake it off."""
+    frames: list[Image.Image] = []
+    # (body_left, body_top, body_width, body_height, arm_dy, eye_mode, eye_dy, bang)
+    specs = [
+        (9, 13, 14, 15, 1, "normal", -1, True),
+        (9, 14, 14, 14, 2, "normal", -1, True),
+        (8, 16, 16, 12, 3, "normal", 0, False),
+        (8, 16, 16, 12, 4, "blink", 0, False),
+    ]
+    for b_left, b_top, b_w, b_h, arm_dy, eyes, edy, bang in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=b_top,
+            body_width=b_w,
+            body_height=b_h,
+            left_arm_dy=arm_dy,
+            right_arm_dy=arm_dy,
+            eye_mode=eyes,
+            eye_dy=edy,
+        )
+        if bang:
+            _draw_bang(g, 26, b_top - 9)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_peek_edge() -> list[Image.Image]:
+    """4-frame hide at the left frame edge: only the right half (one eye + arm) peeks out."""
+    frames: list[Image.Image] = []
+    # (body_left, right_arm_dy, eye_mode, eye_dx)
+    specs = [
+        (-8, 4, "normal", 0),
+        (-8, 3, "normal", 1),
+        (-7, 4, "normal", 1),
+        (-8, 4, "blink", 0),
+    ]
+    for b_left, r_arm, eyes, edx in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            right_arm_dy=r_arm,
+            leg_xs=(b_left, b_left + 4, b_left + 10, b_left + 14),
+            eye_mode=eyes,
+            eye_dx=edx,
+        )
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_peek_out() -> list[Image.Image]:
+    """4-frame lean out of the hiding edge to wave at a nearby cursor."""
+    frames: list[Image.Image] = []
+    for r_arm in (4, 1, 0, 1):
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=-2,
+            right_arm_dy=r_arm,
+            leg_xs=(-2, 2, 8, 12),
+            eye_dx=1,
+        )
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_celebrate() -> list[Image.Image]:
+    """8-frame victory dance when Claude Code finishes: bounce, arms pumping, confetti burst."""
+    frames: list[Image.Image] = []
+    confetti_colors = (STAR_GOLD, HEART_PINK, ELECTRIC_CYAN, ZZZ_WHITE)
+    # (body_top, l_arm, r_arm, confetti points)
+    specs = [
+        (16, 4, 4, [(14, 12), (17, 11)]),
+        (14, 1, 1, [(10, 8), (21, 7), (15, 6), (18, 9)]),
+        (15, 1, 1, [(6, 6), (25, 5), (13, 3), (20, 4), (9, 10), (23, 10)]),
+        (14, 1, 2, [(4, 9), (27, 8), (11, 5), (21, 2), (16, 1)]),
+        (16, 2, 1, [(3, 13), (28, 12), (9, 8), (23, 6), (15, 4)]),
+        (14, 1, 1, [(3, 16), (28, 15), (8, 11), (24, 10)]),
+        (15, 1, 1, [(2, 19), (29, 18), (7, 14)]),
+        (16, 3, 3, [(25, 13)]),
+    ]
+    for b_top, l_arm, r_arm, confetti in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_top=b_top,
+            body_height=28 - b_top,
+            left_arm_dy=l_arm,
+            right_arm_dy=r_arm,
+            eye_mode="squint",
+        )
+        for i, (cx, cy) in enumerate(confetti):
+            _px(g, cx, cy, confetti_colors[i % len(confetti_colors)])
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_error_sweat() -> list[Image.Image]:
+    """6-frame nervous slump after a tool failure: droopy arms, downcast eyes, sweat drop sliding."""
+    frames: list[Image.Image] = []
+    # (body_top, arm_dy, eye_dx, sweat y or None, spark)
+    specs = [
+        (17, 5, 0, 11, True),
+        (17, 6, -1, 12, False),
+        (18, 6, -1, 14, False),
+        (18, 6, 0, 16, True),
+        (17, 6, 1, 18, False),
+        (17, 5, 0, None, False),
+    ]
+    for b_top, arm_dy, edx, sweat_y, spark in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_top=b_top,
+            body_height=28 - b_top,
+            left_arm_dy=arm_dy,
+            right_arm_dy=arm_dy,
+            eye_dx=edx,
+            eye_dy=1,
+        )
+        if sweat_y is not None:
+            _px(g, 26, sweat_y, SWEAT_BLUE)
+            _rect(g, 25, sweat_y + 1, 3, 2, SWEAT_BLUE)
+        if spark:
+            for sx, sy in ((3, 10), (4, 11), (3, 12)):
+                _px(g, sx, sy, ELECTRIC_CYAN)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_alert() -> list[Image.Image]:
+    """4-frame attention loop when Claude Code waits for you: wide eyes and a bobbing golden '!'."""
+    frames: list[Image.Image] = []
+    # (body_top, l_arm, r_arm, bang_y)
+    specs = [
+        (16, 4, 2, 4),
+        (15, 4, 1, 3),
+        (16, 4, 2, 4),
+        (16, 4, 3, 5),
+    ]
+    for b_top, l_arm, r_arm, bang_y in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_top=b_top,
+            body_height=28 - b_top,
+            left_arm_dy=l_arm,
+            right_arm_dy=r_arm,
+            eye_dy=-1,
+        )
+        _draw_bang(g, 15, bang_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_push_window() -> list[Image.Image]:
+    """6-frame side-profile shove facing right: pushing arm locked forward, legs braced and stepping."""
+    frames: list[Image.Image] = []
+    c_main = TERRACOTTA
+    c_back = TERRACOTTA_DARK
+    # (body_left, leg_xs, leg_bottoms, leg_colors)
+    specs = [
+        (10, (8, 12, 18, 22), (31, 30, 31, 30), (c_main, c_back, c_main, c_back)),
+        (10, (7, 12, 17, 22), (31, 31, 31, 31), (c_main, c_back, c_main, c_back)),
+        (11, (8, 13, 18, 23), (30, 31, 30, 31), (c_back, c_main, c_back, c_main)),
+        (11, (8, 12, 18, 22), (31, 31, 31, 31), (c_back, c_main, c_back, c_main)),
+        (10, (7, 12, 17, 22), (31, 30, 31, 30), (c_main, c_back, c_main, c_back)),
+        (11, (8, 13, 18, 23), (31, 31, 31, 31), (c_main, c_main, c_main, c_main)),
+    ]
+    for b_left, l_xs, l_bots, l_cols in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_left=b_left,
+            body_top=17,
+            body_width=15,
+            body_height=11,
+            left_arm_dy=5,
+            right_arm_dy=3,
+            leg_xs=l_xs,
+            leg_bottoms=l_bots,
+            leg_colors=l_cols,
+            eye_mode="squint",
+            eye_dx=1,
+        )
+        # Stretch the pushing arm all the way to the right frame edge (the window side)
+        arm_x = b_left + 15 + 4
+        _rect(g, arm_x, 20, GRID_SIZE - arm_x, 3, TERRACOTTA)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
 def generate_all_sprites(output_dir: Path | None = None) -> Path:
     """Generate all authentic docs/clawd.png sprite strips, manifest.json, and clawdlet.ico."""
     if output_dir is None:
@@ -1263,6 +1695,21 @@ def generate_all_sprites(output_dir: Path | None = None) -> Path:
         "free_fall": {"frames": _build_free_fall(), "fps": 8.0, "loop": True},
         "land_squish": {"frames": _build_land_squish(), "fps": 10.0, "loop": False},
         "dizzy": {"frames": _build_dizzy(), "fps": 6.0, "loop": True},
+        # Milestone 5 interactions (gaze is always indexed by the controller, never time-based)
+        "gaze": {"frames": _build_gaze(), "fps": 1.0, "loop": True},
+        "pounce": {"frames": _build_pounce(), "fps": 8.6, "loop": False},
+        "poked": {"frames": _build_poked(), "fps": 6.6, "loop": False},
+        "petted": {"frames": _build_petted(), "fps": 6.0, "loop": True},
+        "flail": {"frames": _build_flail(), "fps": 8.0, "loop": True},
+        "yawn": {"frames": _build_yawn(), "fps": 5.0, "loop": False},
+        "sleep": {"frames": _build_sleep(), "fps": 3.0, "loop": True},
+        "wake_startle": {"frames": _build_wake_startle(), "fps": 6.6, "loop": False},
+        "peek_edge": {"frames": _build_peek_edge(), "fps": 2.0, "loop": True},
+        "peek_out": {"frames": _build_peek_out(), "fps": 4.0, "loop": True},
+        "celebrate": {"frames": _build_celebrate(), "fps": 5.0, "loop": True},
+        "error_sweat": {"frames": _build_error_sweat(), "fps": 4.3, "loop": False},
+        "alert": {"frames": _build_alert(), "fps": 4.0, "loop": True},
+        "push_window": {"frames": _build_push_window(), "fps": 6.0, "loop": True},
     }
 
     manifest: dict[str, object] = {

@@ -174,3 +174,10 @@ class SpriteSheetBank:
         if anim is None:
             raise KeyError(f"No animation found for {animation_name!r}")
         return anim.frame_at(elapsed_s)
+
+    def get_frame_index(self, animation_name: str, index: int) -> SpriteFrame:
+        """Return a specific frame (clamped to the strip), for controller-driven poses such as gaze."""
+        anim = self._animations.get(animation_name) or self._animations.get("idle_breathe")
+        if anim is None or not anim.frames:
+            raise KeyError(f"No animation found for {animation_name!r}")
+        return anim.frames[max(0, min(int(index), len(anim.frames) - 1))]

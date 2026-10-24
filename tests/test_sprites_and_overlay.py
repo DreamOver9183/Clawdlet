@@ -20,6 +20,25 @@ from clawdlet.window_tracker import Win32ClaudeTracker
 DESIGNED_AIRBORNE_FRAMES = {"typing_laptop": (2, 3, 4), "kick_laptop": (4,)}
 
 
+# Milestone 5 interaction animations; every one of them is drawn standing on the ground row
+M5_EXPECTED_FRAMES = {
+    "gaze": 10,
+    "pounce": 3,
+    "poked": 4,
+    "petted": 8,
+    "flail": 6,
+    "yawn": 6,
+    "sleep": 8,
+    "wake_startle": 4,
+    "peek_edge": 4,
+    "peek_out": 4,
+    "celebrate": 8,
+    "error_sweat": 6,
+    "alert": 4,
+    "push_window": 6,
+}
+
+
 def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> None:
     manifest_path = generate_all_sprites(tmp_path)
     assert manifest_path.exists()
@@ -39,6 +58,7 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
         "free_fall": 4,
         "land_squish": 4,
         "dizzy": 6,
+        **M5_EXPECTED_FRAMES,
     }
     for anim_name, frame_count in expected_frames.items():
         strip_path = tmp_path / f"{anim_name}.png"
@@ -58,6 +78,7 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
         "perch_look_down",
         "land_squish",
         "dizzy",
+        *M5_EXPECTED_FRAMES,
     ):
         strip_path = tmp_path / f"{grounded_anim}.png"
         with Image.open(strip_path) as img:
@@ -127,7 +148,7 @@ def test_overlay_and_in_process_win32_tracker(tmp_path: Path) -> None:
 def test_app_short_run_lifecycle() -> None:
     from clawdlet.app import main
 
-    rc = main(["--duration", "0.12", "--scale", "2", "--spawn", "center"])
+    rc = main(["--duration", "0.12", "--scale", "2", "--spawn", "center", "--no-hooks"])
     assert rc == 0
 
 

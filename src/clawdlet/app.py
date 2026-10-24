@@ -5,17 +5,28 @@ from __future__ import annotations
 import argparse
 import ctypes
 import queue
+import sys
 import signal
 import time
 import tkinter as tk
 
+from clawdlet.agent_events import (
+    DEFAULT_HOOK_PORT,
+    AgentEvent,
+    HookServer,
+    format_hook_settings,
+    load_or_create_token,
+)
 from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
 from clawdlet.config import ActivityMode, PhysicsConfig, TrackerConfig
 from clawdlet.geometry import PixelMapper
+from clawdlet.gestures import Gesture
+from clawdlet.input_state import read_pointer_snapshot
 from clawdlet.overlay import ClawdletOverlay
 from clawdlet.physics import PhysicsBody
 from clawdlet.sprites import SpriteSheetBank
 from clawdlet.tray import (
+    CMD_COPY_HOOK_CONFIG,
     CMD_EXIT,
     CMD_MODE_HYPER,
     CMD_MODE_NORMAL,
@@ -27,12 +38,15 @@ from clawdlet.tray import (
     CMD_SUMMON_CLAUDE,
     CMD_TOGGLE_CLICK_THROUGH,
     CMD_TOGGLE_DEBUG,
+    CMD_TOGGLE_PEEK,
     CMD_TOGGLE_TYPING,
+    CMD_TOGGLE_WINDOW_PUSH,
     TrayAction,
     TrayMenuState,
     Win32TrayIcon,
+    copy_text_to_clipboard,
 )
-from clawdlet.window_tracker import Win32ClaudeTracker, get_physical_work_area
+from clawdlet.window_tracker import Win32ClaudeTracker, get_physical_work_area, nudge_window
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -75,6 +89,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable the Windows system tray icon.",
     )
     parser.add_argument(
+        "--allow-window-push",
+        action="store_true",
+        help="Let Hyper mode occasionally nudge the Claude window a few pixels (off by default).",
+    )
+    parser.add_argument(
+        "--hook-port",
+        type=int,
+        default=DEFAULT_HOOK_PORT,
+        help=f"Localhost port for Claude Code http hooks (default: {DEFAULT_HOOK_PORT}).",
+    )
+    parser.add_argument(
+        "--no-hooks",
+        action="store_true",
+        help="Do not start the Claude Code hook receiver.",
+    )
+    parser.add_argument(
+        "--print-hook-config",
+        action="store_true",
+        help="Print the hooks block for ~/.claude/settings.json and exit.",
+    )
+    parser.add_argument(
         "--duration",
         type=float,
         default=0.0,
@@ -99,12 +134,25 @@ def sync_tray_state(tray_state: TrayMenuState, controller: ClawdletController) -
     tray_state.manual_typing = controller.manual_typing
 
 
+def dispatch_gesture(gesture: Gesture, controller: ClawdletController) -> None:
+    """Route a settled overlay mouse gesture to the matching controller reaction."""
+    if gesture == Gesture.POKE:
+        controller.poke()
+    elif gesture == Gesture.DOUBLE:
+        controller.toggle_typing()
+    elif gesture == Gesture.COMBO:
+        controller.flail()
+    elif gesture == Gesture.PET:
+        controller.pet()
+
+
 def dispatch_tray_action(
     cmd_id: int,
     controller: ClawdletController,
     overlay: ClawdletOverlay,
     tray_state: TrayMenuState,
     latest_win: WindowSnapshot | None,
+    hook_config: str | None = None,
 ) -> bool:
     """Apply a single tray menu command. Return True if application should exit."""
     if cmd_id == CMD_SUMMON_CENTER:
@@ -115,6 +163,12 @@ def dispatch_tray_action(
         tray_state.manual_typing = False
     elif cmd_id == CMD_TOGGLE_TYPING:
         tray_state.manual_typing = controller.toggle_typing()
+    elif cmd_id == CMD_TOGGLE_WINDOW_PUSH:
+        controller.push_window_enabled = not controller.push_window_enabled
+        tray_state.window_push = controller.push_window_enabled
+    elif cmd_id == CMD_TOGGLE_PEEK:
+        controller.set_peek_mode(not controller.peek_mode)
+        tray_state.peek_mode = controller.peek_mode
     elif cmd_id == CMD_MODE_QUIET:
         controller.set_activity_mode(ActivityMode.QUIET)
         tray_state.activity_mode = ActivityMode.QUIET
@@ -136,6 +190,9 @@ def dispatch_tray_action(
         new_dbg = not overlay.debug
         overlay.set_debug(new_dbg)
         tray_state.debug = new_dbg
+    elif cmd_id == CMD_COPY_HOOK_CONFIG:
+        if hook_config is not None and copy_text_to_clipboard(hook_config):
+            print("[Clawdlet] Claude Code hook settings copied to the clipboard.")
     elif cmd_id == CMD_EXIT:
         return True
     return False
@@ -143,6 +200,9 @@ def dispatch_tray_action(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.print_hook_config:
+        print(format_hook_settings(args.hook_port, load_or_create_token()))
+        return 0
     _enable_per_monitor_dpi_awareness()
 
     root = tk.Tk()
@@ -181,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         tracker_cfg=tracker_cfg,
         activity_mode=initial_mode,
     )
+    controller.window_nudger = nudge_window
+    controller.push_window_enabled = args.allow_window_push
     overlay = ClawdletOverlay(
         root=root,
         controller=controller,
@@ -197,7 +259,24 @@ def main(argv: list[str] | None = None) -> int:
         scale=args.scale,
         click_through=args.click_through,
         debug=args.debug,
+        window_push=args.allow_window_push,
     )
+    hook_queue: queue.Queue[tuple[AgentEvent, str]] = queue.Queue()
+    hook_server: HookServer | None = None
+    hook_config: str | None = None
+    if not args.no_hooks:
+        token = load_or_create_token()
+        hook_server = HookServer(token=token, events=hook_queue, port=args.hook_port)
+        if hook_server.start():
+            hook_config = format_hook_settings(int(hook_server.port or args.hook_port), token)
+            tray_state.hooks_status = f"Claude Code Hooks：監聽中 127.0.0.1:{hook_server.port}"
+        else:
+            print(
+                f"[Clawdlet] Port {args.hook_port} is busy; Claude Code hooks disabled.",
+                file=sys.stderr,
+            )
+            hook_server = None
+
     tray_icon: Win32TrayIcon | None = None
     if not args.no_tray:
         icon_path = sprite_bank.assets_dir / "clawdlet.ico"
@@ -223,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
         running = False
         if tray_icon is not None:
             tray_icon.stop()
+        if hook_server is not None:
+            hook_server.stop()
         try:
             root.quit()
             root.destroy()
@@ -260,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             controller.set_work_area(mapper.to_logical_rect(get_physical_work_area()))
 
         win_snap = tracker.poll(now)
+        pointer = read_pointer_snapshot()
 
         # Process any pending System Tray commands
         while True:
@@ -273,18 +355,31 @@ def main(argv: list[str] | None = None) -> int:
                 overlay=overlay,
                 tray_state=tray_state,
                 latest_win=win_snap,
+                hook_config=hook_config,
             )
             if should_exit:
                 _stop()
                 return
 
+        for gesture in overlay.poll_gestures(now):
+            dispatch_gesture(gesture, controller)
+
+        while True:
+            try:
+                agent_event, session_id = hook_queue.get_nowait()
+            except queue.Empty:
+                break
+            if overlay.debug:
+                print(f"[Clawdlet] hook event={agent_event.value}")
+            controller.handle_agent_event(agent_event, session_id)
+
         render_state = None
         while accumulator >= fixed_dt:
-            render_state = controller.tick(fixed_dt, win_snap)
+            render_state = controller.tick(fixed_dt, win_snap, pointer)
             accumulator -= fixed_dt
 
         if render_state is None:
-            render_state = controller.tick(fixed_dt, win_snap)
+            render_state = controller.tick(fixed_dt, win_snap, pointer)
 
         sync_tray_state(tray_state, controller)
         overlay.sync_frame(render_state, frame_dt)
@@ -314,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if tray_icon is not None:
             tray_icon.stop()
+        if hook_server is not None:
+            hook_server.stop()
     return 0
 
 

@@ -99,6 +99,104 @@
       "fps": 6.0,
       "loop": true,
       "loop_start": 0
+    },
+    "gaze": {
+      "file": "gaze.png",
+      "frames": 10,
+      "fps": 1.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "pounce": {
+      "file": "pounce.png",
+      "frames": 3,
+      "fps": 8.6,
+      "loop": false,
+      "loop_start": 0
+    },
+    "poked": {
+      "file": "poked.png",
+      "frames": 4,
+      "fps": 6.6,
+      "loop": false,
+      "loop_start": 0
+    },
+    "petted": {
+      "file": "petted.png",
+      "frames": 8,
+      "fps": 6.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "flail": {
+      "file": "flail.png",
+      "frames": 6,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "yawn": {
+      "file": "yawn.png",
+      "frames": 6,
+      "fps": 5.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "sleep": {
+      "file": "sleep.png",
+      "frames": 8,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "wake_startle": {
+      "file": "wake_startle.png",
+      "frames": 4,
+      "fps": 6.6,
+      "loop": false,
+      "loop_start": 0
+    },
+    "peek_edge": {
+      "file": "peek_edge.png",
+      "frames": 4,
+      "fps": 2.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "peek_out": {
+      "file": "peek_out.png",
+      "frames": 4,
+      "fps": 4.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "celebrate": {
+      "file": "celebrate.png",
+      "frames": 8,
+      "fps": 5.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "error_sweat": {
+      "file": "error_sweat.png",
+      "frames": 6,
+      "fps": 4.3,
+      "loop": false,
+      "loop_start": 0
+    },
+    "alert": {
+      "file": "alert.png",
+      "frames": 4,
+      "fps": 4.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "push_window": {
+      "file": "push_window.png",
+      "frames": 6,
+      "fps": 6.0,
+      "loop": true,
+      "loop_start": 0
     }
   }
 }

@@ -26,6 +26,10 @@ CMD_SCALE_2X = 1022
 CMD_SCALE_3X = 1023
 CMD_TOGGLE_CLICK_THROUGH = 1031
 CMD_TOGGLE_DEBUG = 1032
+CMD_TOGGLE_PEEK = 1041
+CMD_TOGGLE_WINDOW_PUSH = 1042
+CMD_COPY_HOOK_CONFIG = 1051
+CMD_HOOK_STATUS = 1052  # Disabled informational row
 CMD_EXIT = 1099
 
 
@@ -45,6 +49,27 @@ class TrayMenuState:
     click_through: bool = False
     debug: bool = False
     manual_typing: bool = False
+    peek_mode: bool = False
+    window_push: bool = False
+    hooks_status: str = "Claude Code Hooks：關閉 (Off)"
+
+
+def copy_text_to_clipboard(text: str) -> bool:
+    """Put ``text`` on the Windows clipboard; return False if the clipboard is busy."""
+    import win32clipboard
+
+    try:
+        win32clipboard.OpenClipboard()
+    except Exception:
+        return False
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        return True
+    except Exception:
+        return False
+    finally:
+        win32clipboard.CloseClipboard()
 
 
 class Win32TrayIcon:
@@ -206,6 +231,37 @@ class Win32TrayIcon:
             typing_flags,
             CMD_TOGGLE_TYPING,
             "掏出筆電打字 (Coding / Typing Mode)",
+        )
+        peek_flags = win32con.MF_STRING | (
+            win32con.MF_CHECKED if self.state.peek_mode else win32con.MF_UNCHECKED
+        )
+        win32gui.AppendMenu(
+            menu,
+            peek_flags,
+            CMD_TOGGLE_PEEK,
+            "邊緣躲藏 (Peek from Screen Edge)",
+        )
+        push_flags = win32con.MF_STRING | (
+            win32con.MF_CHECKED if self.state.window_push else win32con.MF_UNCHECKED
+        )
+        win32gui.AppendMenu(
+            menu,
+            push_flags,
+            CMD_TOGGLE_WINDOW_PUSH,
+            "允許推視窗（過動模式） (Allow Window Push, Hyper)",
+        )
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+        win32gui.AppendMenu(
+            menu,
+            win32con.MF_STRING | win32con.MF_GRAYED,
+            CMD_HOOK_STATUS,
+            self.state.hooks_status,
+        )
+        win32gui.AppendMenu(
+            menu,
+            win32con.MF_STRING,
+            CMD_COPY_HOOK_CONFIG,
+            "複製 Claude Code hook 設定 (Copy Hook Settings)",
         )
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
 

@@ -23,6 +23,8 @@ class ActivityProfile:
     wander_probability: float
     claude_seek_weight: float
     wall_climb_chance: float
+    chase_chance: float = 0.0          # Probability of chasing a nearby cursor at each rest decision
+    pounce_enabled: bool = False       # Hyper only: pounce at a cursor resting above the pet
 
 
 ACTIVITY_PROFILES: dict[ActivityMode, ActivityProfile] = {
@@ -32,6 +34,7 @@ ACTIVITY_PROFILES: dict[ActivityMode, ActivityProfile] = {
         wander_probability=0.22,
         claude_seek_weight=0.50,
         wall_climb_chance=0.0,
+        chase_chance=0.15,
     ),
     ActivityMode.NORMAL: ActivityProfile(
         speed_multiplier=1.00,
@@ -39,6 +42,7 @@ ACTIVITY_PROFILES: dict[ActivityMode, ActivityProfile] = {
         wander_probability=0.62,
         claude_seek_weight=0.72,
         wall_climb_chance=0.55,
+        chase_chance=0.35,
     ),
     ActivityMode.HYPER: ActivityProfile(
         speed_multiplier=1.65,
@@ -46,6 +50,8 @@ ACTIVITY_PROFILES: dict[ActivityMode, ActivityProfile] = {
         wander_probability=0.88,
         claude_seek_weight=0.88,
         wall_climb_chance=0.85,
+        chase_chance=0.60,
+        pounce_enabled=True,
     ),
 }
 
@@ -81,3 +87,18 @@ class TrackerConfig:
     rescan_interval_s: float = 0.5     # 2 Hz full EnumWindows scan when unlocked or verifying
     shake_speed_threshold: float = 1600.0  # Window drag velocity threshold v_threshold (px/s)
     velocity_ema_alpha: float = 0.45   # Exponential smoothing factor for window velocity
+
+
+@dataclass(frozen=True)
+class InteractionConfig:
+    """Milestone 5 cursor awareness, touch reactions, sleep schedule, and agent-hook timings."""
+
+    gaze_radius: float = 600.0         # Eyes follow the cursor within this distance (logical px)
+    chase_radius: float = 700.0        # Horizontal distance within which the pet may chase the cursor
+    chase_timeout_s: float = 4.0       # Give up chasing after this long
+    pounce_still_s: float = 1.2        # Cursor must rest this long before a Hyper pounce
+    pounce_cooldown_s: float = 8.0
+    sleep_after_idle_s: float = 90.0   # User idle time (GetLastInputInfo) before yawning
+    wake_idle_s: float = 1.0           # Any input more recent than this wakes the pet
+    alert_timeout_s: float = 30.0      # ALERT ("!") gives up after this long without a follow-up event
+    agent_busy_expiry_s: float = 180.0 # A busy agent session with no events for this long is idle
