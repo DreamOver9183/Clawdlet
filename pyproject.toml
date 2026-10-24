@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clawdlet"
+version = "0.1.0"
+description = "Clawdlet — An unofficial, fan-made physics desktop pet that perches on your Claude Desktop window."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "Pillow>=10.0",
+    "pywin32>=306",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+clawdlet = "clawdlet.app:main"
+clawdlet-dump-windows = "clawdlet.tools.dump_windows:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,234 @@
+"""Frameless always-on-top transparent overlay GUI using Tkinter + Win32 LWA_COLORKEY."""
+
+from __future__ import annotations
+
+import ctypes
+import tkinter as tk
+from PIL import ImageTk
+import win32con
+import win32gui
+
+from clawdlet.behavior import ClawdletController, PetState, RenderFrameState
+from clawdlet.sprites import CHROMA_KEY_HEX, CHROMA_KEY_RGB, SpriteFrame, SpriteSheetBank
+
+
+class ClawdletOverlay:
+    """Transparent desktop pet overlay window with Win32 color-key & click-through lock."""
+
+    def __init__(
+        self,
+        root: tk.Tk,
+        controller: ClawdletController,
+        sprite_bank: SpriteSheetBank,
+        debug: bool = False,
+        click_through: bool = False,
+    ) -> None:
+        self.root = root
+        self.controller = controller
+        self.sprite_bank = sprite_bank
+        self.debug = debug
+        self.click_through = click_through
+
+        self.width = self.sprite_bank.scaled_width
+        self.height = self.sprite_bank.scaled_height
+
+        self._anim_name: str = PetState.IDLE.animation_name
+        self._anim_elapsed_s: float = 0.0
+        self._current_frame: SpriteFrame = self.sprite_bank.get_frame(self._anim_name, 0.0)
+        self._photo_image: ImageTk.PhotoImage | None = None
+        self._last_pos: tuple[int, int] | None = None
+        self._last_render_key: tuple[str, int, int, int, bool, int] | None = None
+
+        self._configure_window()
+
+    @property
+    def scale(self) -> int:
+        return self.sprite_bank.scale
+
+    @property
+    def toplevel_hwnd(self) -> int:
+        """Return the outer TkTopLevel HWND (never the inner TkChild HWND)."""
+        self.root.update_idletasks()
+        child_id = int(self.root.winfo_id())
+        parent_id = int(win32gui.GetParent(child_id))
+        ctypes.windll.kernel32.SetLastError(0)
+        if parent_id != 0:
+            return parent_id
+        frame_str = self.root.wm_frame()
+        if frame_str:
+            try:
+                return int(frame_str, 16)
+            except ValueError:
+                pass
+        return child_id
+
+    def _configure_window(self) -> None:
+        self.root.title("Clawdlet")
+        self.root.overrideredirect(True)
+        self.root.wm_attributes("-topmost", True)
+        self.root.wm_attributes("-transparentcolor", CHROMA_KEY_HEX)
+        self.root.configure(bg=CHROMA_KEY_HEX)
+
+        self.canvas = tk.Canvas(
+            self.root,
+            width=self.width,
+            height=self.height,
+            bg=CHROMA_KEY_HEX,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.canvas.pack(fill="both", expand=True)
+        self._image_item = self.canvas.create_image(0, 0, anchor="nw")
+        self._debug_bg_item = self.canvas.create_rectangle(
+            0,
+            0,
+            self.width,
+            18,
+            fill="#181818",
+            outline="",
+            state="normal" if self.debug else "hidden",
+        )
+        self._debug_text_item = self.canvas.create_text(
+            4,
+            2,
+            anchor="nw",
+            fill="#FFE8B0",
+            font=("Consolas", 8, "bold"),
+            text="",
+            state="normal" if self.debug else "hidden",
+        )
+
+        # Bind mouse interactions
+        self.canvas.bind("<ButtonPress-1>", self._on_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        self.canvas.bind("<ButtonPress-3>", self._on_right_press)
+
+        self.root.update_idletasks()
+        if self.click_through:
+            self.set_click_through(True)
+
+    def set_click_through(self, enabled: bool) -> None:
+        """Toggle WS_EX_TRANSPARENT on outer TkTopLevel so mouse clicks pass through."""
+        self.click_through = bool(enabled)
+        try:
+            hwnd = self.toplevel_hwnd
+            ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if self.click_through:
+                new_style = ex_style | win32con.WS_EX_TRANSPARENT
+            else:
+                new_style = ex_style & ~win32con.WS_EX_TRANSPARENT
+            if new_style != ex_style:
+                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, new_style)
+        except Exception:
+            pass
+        finally:
+            ctypes.windll.kernel32.SetLastError(0)
+
+    def set_debug(self, enabled: bool) -> None:
+        """Toggle on-screen debug status banner."""
+        self.debug = bool(enabled)
+        vis_state = "normal" if self.debug else "hidden"
+        self.canvas.itemconfigure(self._debug_bg_item, state=vis_state)
+        self.canvas.itemconfigure(self._debug_text_item, state=vis_state)
+
+    def set_scale(self, scale: int) -> None:
+        """Change integer pixel-art scaling factor (1x/2x/3x) at runtime."""
+        if scale not in (1, 2, 3) or scale == self.sprite_bank.scale:
+            return
+        self.sprite_bank = SpriteSheetBank(
+            assets_dir=self.sprite_bank.assets_dir,
+            scale=scale,
+        )
+        self.width = self.sprite_bank.scaled_width
+        self.height = self.sprite_bank.scaled_height
+        self.controller.resize_body(float(self.width), float(self.height))
+
+        self.canvas.configure(width=self.width, height=self.height)
+        self.canvas.coords(self._debug_bg_item, 0, 0, self.width, 18)
+        self._last_render_key = None
+        self._last_pos = None
+        nx = round(self.controller.body.x)
+        ny = round(self.controller.body.y)
+        self.root.geometry(f"{self.width}x{self.height}+{nx}+{ny}")
+
+    def sync_frame(self, state: RenderFrameState, dt: float) -> None:
+        """Update window position, active animation frame, and squash/flip image."""
+        if state.animation_name != self._anim_name:
+            self._anim_name = state.animation_name
+            self._anim_elapsed_s = 0.0
+        else:
+            self._anim_elapsed_s += dt
+
+        frame = self.sprite_bank.get_frame(self._anim_name, self._anim_elapsed_s)
+        self._current_frame = frame
+
+        qx = round(state.scale_x * 50)
+        qy = round(state.scale_y * 50)
+        render_key = (
+            self._anim_name,
+            id(frame.image),
+            qx,
+            qy,
+            state.flip_x,
+            self.sprite_bank.scale,
+        )
+        if render_key != self._last_render_key or self._photo_image is None:
+            self._last_render_key = render_key
+            composited = frame.render_with_squash(
+                scale_x=state.scale_x,
+                scale_y=state.scale_y,
+                flip_x=state.flip_x,
+                chroma_rgb=CHROMA_KEY_RGB,
+            )
+            self._photo_image = ImageTk.PhotoImage(composited, master=self.root)
+            self.canvas.itemconfigure(self._image_item, image=self._photo_image)
+
+        if self.debug:
+            hwnd_str = hex(state.locked_hwnd) if state.locked_hwnd else "-"
+            lock_tag = "[LOCK]" if self.click_through else ""
+            self.canvas.itemconfigure(
+                self._debug_text_item,
+                text=f"{lock_tag}{state.state.name[:9]}|{hwnd_str}",
+            )
+
+        target_pos = (state.x, state.y)
+        if target_pos != self._last_pos:
+            self._last_pos = target_pos
+            self.root.geometry(f"{self.width}x{self.height}+{state.x}+{state.y}")
+
+        self.root.wm_attributes("-topmost", True)
+
+    def _on_left_press(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        self.canvas.configure(cursor="fleur")
+        self.controller.begin_drag(float(event.x_root), float(event.y_root))
+
+    def _on_left_drag(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        self.controller.update_drag(float(event.x_root), float(event.y_root))
+        nx = round(self.controller.body.x)
+        ny = round(self.controller.body.y)
+        if (nx, ny) != self._last_pos:
+            self._last_pos = (nx, ny)
+            self.root.geometry(f"{self.width}x{self.height}+{nx}+{ny}")
+
+    def _on_left_release(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        self.canvas.configure(cursor="hand2")
+        self.controller.end_drag()
+
+    def _on_right_press(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        self.controller.hop(-650.0)
+
+    def _on_double_click(self, _event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self.click_through:
+            return
+        self.controller.toggle_typing()

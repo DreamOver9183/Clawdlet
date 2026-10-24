@@ -1,0 +1,76 @@
+{
+  "frame_width": 64,
+  "frame_height": 64,
+  "animations": {
+    "idle_breathe": {
+      "file": "idle_breathe.png",
+      "frames": 4,
+      "fps": 2.5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "idle_blob": {
+      "file": "idle_blob.png",
+      "frames": 4,
+      "fps": 2.5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "walk_horizontal": {
+      "file": "walk_horizontal.png",
+      "frames": 6,
+      "fps": 6,
+      "loop": true,
+      "loop_start": 0
+    },
+    "typing_laptop": {
+      "file": "typing_laptop.png",
+      "frames": 19,
+      "fps": 5.5,
+      "loop": true,
+      "loop_start": 11
+    },
+    "climb_vertical": {
+      "file": "climb_vertical.png",
+      "frames": 4,
+      "fps": 5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "perch_look_down": {
+      "file": "perch_look_down.png",
+      "frames": 4,
+      "fps": 2.5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "dragged_struggle": {
+      "file": "dragged_struggle.png",
+      "frames": 4,
+      "fps": 7,
+      "loop": true,
+      "loop_start": 0
+    },
+    "free_fall": {
+      "file": "free_fall.png",
+      "frames": 2,
+      "fps": 6,
+      "loop": true,
+      "loop_start": 0
+    },
+    "land_squish": {
+      "file": "land_squish.png",
+      "frames": 3,
+      "fps": 9,
+      "loop": false,
+      "loop_start": 0
+    },
+    "dizzy": {
+      "file": "dizzy.png",
+      "frames": 4,
+      "fps": 5,
+      "loop": true,
+      "loop_start": 0
+    }
+  }
+}
