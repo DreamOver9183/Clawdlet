@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import ctypes
+from dataclasses import dataclass
+from pathlib import Path
 import queue
 import sys
 import signal
@@ -17,6 +20,8 @@ from clawdlet.agent_events import (
     format_hook_settings,
     load_or_create_token,
 )
+from clawdlet.hook_install import default_settings_path, hooks_installed, install_hooks, uninstall_hooks
+from clawdlet.transcript_watch import TranscriptWatcher
 from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
 from clawdlet.config import ActivityMode, PhysicsConfig, TrackerConfig
 from clawdlet.geometry import PixelMapper
@@ -38,12 +43,14 @@ from clawdlet.tray import (
     CMD_SUMMON_CLAUDE,
     CMD_TOGGLE_CLICK_THROUGH,
     CMD_TOGGLE_DEBUG,
+    CMD_TOGGLE_HOOK_INSTALL,
     CMD_TOGGLE_PEEK,
     CMD_TOGGLE_TYPING,
     CMD_TOGGLE_WINDOW_PUSH,
     TrayAction,
     TrayMenuState,
     Win32TrayIcon,
+    confirm_dialog,
     copy_text_to_clipboard,
 )
 from clawdlet.window_tracker import Win32ClaudeTracker, get_physical_work_area, nudge_window
@@ -105,9 +112,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Do not start the Claude Code hook receiver.",
     )
     parser.add_argument(
+        "--no-transcript-watch",
+        action="store_true",
+        help="Do not watch Claude Code session transcripts for activity (hook-less fallback).",
+    )
+    parser.add_argument(
         "--print-hook-config",
         action="store_true",
         help="Print the hooks block for ~/.claude/settings.json and exit.",
+    )
+    parser.add_argument(
+        "--install-hooks",
+        action="store_true",
+        help="Add Clawdlet's hooks to ~/.claude/settings.json (backup first) and exit.",
+    )
+    parser.add_argument(
+        "--uninstall-hooks",
+        action="store_true",
+        help="Remove Clawdlet's hooks from ~/.claude/settings.json (backup first) and exit.",
+    )
+    parser.add_argument(
+        "--claude-settings",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,  # Alternate settings.json for tests and dry runs
     )
     parser.add_argument(
         "--duration",
@@ -146,6 +174,45 @@ def dispatch_gesture(gesture: Gesture, controller: ClawdletController) -> None:
         controller.pet()
 
 
+@dataclass
+class HookSetup:
+    """What the tray needs to (un)install hooks for the running receiver."""
+
+    port: int
+    token: str
+    settings_path: Path
+    listening: bool
+    confirm: Callable[[str], bool] = confirm_dialog
+
+
+def hooks_status_text(setup: HookSetup | None, installed: bool) -> str:
+    if setup is None or not setup.listening:
+        return "Claude Code Hooks：關閉 (Off)"
+    if installed:
+        return f"Claude Code Hooks：已安裝・監聽中 127.0.0.1:{setup.port}"
+    return f"Claude Code Hooks：未安裝（對話紀錄監看中）:{setup.port}"
+
+
+def toggle_hook_install(setup: HookSetup, tray_state: TrayMenuState) -> None:
+    """Install or remove Clawdlet's hooks after an explicit Yes from the user."""
+    if tray_state.hooks_installed:
+        question = f"從 {setup.settings_path} 移除 Clawdlet 的 Claude Code hooks？\n（會先備份原檔）"
+        if not setup.confirm(question):
+            return
+        result = uninstall_hooks(setup.settings_path)
+    else:
+        question = (
+            f"把 Clawdlet 的 Claude Code hooks 寫入 {setup.settings_path}？\n"
+            "只會新增指向 127.0.0.1 的項目，其他設定保持不變，並會先備份原檔。"
+        )
+        if not setup.confirm(question):
+            return
+        result = install_hooks(setup.settings_path, setup.port, setup.token)
+    print(f"[Clawdlet] {result.message}" + (f" (backup: {result.backup})" if result.backup else ""))
+    tray_state.hooks_installed = hooks_installed(setup.settings_path, setup.port)
+    tray_state.hooks_status = hooks_status_text(setup, tray_state.hooks_installed)
+
+
 def dispatch_tray_action(
     cmd_id: int,
     controller: ClawdletController,
@@ -153,6 +220,7 @@ def dispatch_tray_action(
     tray_state: TrayMenuState,
     latest_win: WindowSnapshot | None,
     hook_config: str | None = None,
+    hook_setup: HookSetup | None = None,
 ) -> bool:
     """Apply a single tray menu command. Return True if application should exit."""
     if cmd_id == CMD_SUMMON_CENTER:
@@ -190,6 +258,9 @@ def dispatch_tray_action(
         new_dbg = not overlay.debug
         overlay.set_debug(new_dbg)
         tray_state.debug = new_dbg
+    elif cmd_id == CMD_TOGGLE_HOOK_INSTALL:
+        if hook_setup is not None:
+            toggle_hook_install(hook_setup, tray_state)
     elif cmd_id == CMD_COPY_HOOK_CONFIG:
         if hook_config is not None and copy_text_to_clipboard(hook_config):
             print("[Clawdlet] Claude Code hook settings copied to the clipboard.")
@@ -200,9 +271,17 @@ def dispatch_tray_action(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    settings_path = args.claude_settings or default_settings_path()
     if args.print_hook_config:
         print(format_hook_settings(args.hook_port, load_or_create_token()))
         return 0
+    if args.install_hooks or args.uninstall_hooks:
+        if args.install_hooks:
+            result = install_hooks(settings_path, args.hook_port, load_or_create_token())
+        else:
+            result = uninstall_hooks(settings_path)
+        print(result.message + (f" (backup: {result.backup})" if result.backup else ""))
+        return 0 if result.ok else 1
     _enable_per_monitor_dpi_awareness()
 
     root = tk.Tk()
@@ -261,21 +340,30 @@ def main(argv: list[str] | None = None) -> int:
         debug=args.debug,
         window_push=args.allow_window_push,
     )
-    hook_queue: queue.Queue[tuple[AgentEvent, str]] = queue.Queue()
+    hook_queue: queue.Queue[tuple[AgentEvent, str, str]] = queue.Queue()
     hook_server: HookServer | None = None
     hook_config: str | None = None
+    hook_setup: HookSetup | None = None
     if not args.no_hooks:
         token = load_or_create_token()
         hook_server = HookServer(token=token, events=hook_queue, port=args.hook_port)
         if hook_server.start():
-            hook_config = format_hook_settings(int(hook_server.port or args.hook_port), token)
-            tray_state.hooks_status = f"Claude Code Hooks：監聽中 127.0.0.1:{hook_server.port}"
+            port = int(hook_server.port or args.hook_port)
+            hook_config = format_hook_settings(port, token)
+            hook_setup = HookSetup(port=port, token=token, settings_path=settings_path, listening=True)
+            tray_state.hooks_installed = hooks_installed(settings_path, port)
+            tray_state.hooks_status = hooks_status_text(hook_setup, tray_state.hooks_installed)
         else:
             print(
                 f"[Clawdlet] Port {args.hook_port} is busy; Claude Code hooks disabled.",
                 file=sys.stderr,
             )
             hook_server = None
+
+    transcript_watcher: TranscriptWatcher | None = None
+    if not args.no_transcript_watch:
+        transcript_watcher = TranscriptWatcher(events=hook_queue)
+        transcript_watcher.start()
 
     tray_icon: Win32TrayIcon | None = None
     if not args.no_tray:
@@ -304,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
             tray_icon.stop()
         if hook_server is not None:
             hook_server.stop()
+        if transcript_watcher is not None:
+            transcript_watcher.stop()
         try:
             root.quit()
             root.destroy()
@@ -356,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 tray_state=tray_state,
                 latest_win=win_snap,
                 hook_config=hook_config,
+                hook_setup=hook_setup,
             )
             if should_exit:
                 _stop()
@@ -366,12 +457,12 @@ def main(argv: list[str] | None = None) -> int:
 
         while True:
             try:
-                agent_event, session_id = hook_queue.get_nowait()
+                agent_event, session_id, source = hook_queue.get_nowait()
             except queue.Empty:
                 break
             if overlay.debug:
-                print(f"[Clawdlet] hook event={agent_event.value}")
-            controller.handle_agent_event(agent_event, session_id)
+                print(f"[Clawdlet] agent event={agent_event.value} source={source}")
+            controller.handle_agent_event(agent_event, session_id, source)
 
         render_state = None
         while accumulator >= fixed_dt:
@@ -411,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
             tray_icon.stop()
         if hook_server is not None:
             hook_server.stop()
+        if transcript_watcher is not None:
+            transcript_watcher.stop()
     return 0
 
 

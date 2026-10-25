@@ -128,7 +128,7 @@ def test_server_accepts_authorized_event(server) -> None:
     srv, events = server
     body = json.dumps({"hook_event_name": "Stop", "session_id": "s9", "tool_input": {"x": 1}}).encode()
     assert _post(srv.port, body) == 200
-    assert events.get(timeout=2) == (AgentEvent.DONE, "s9")
+    assert events.get(timeout=2) == (AgentEvent.DONE, "s9", "hook")
 
 
 def test_server_ignores_unknown_events_with_200(server) -> None:
@@ -162,7 +162,7 @@ def test_oversized_tool_payload_is_drained_and_still_mapped(server) -> None:
         "tool_response": {"content": "x" * (MAX_BODY_BYTES * 3)},
     }
     assert _post(srv.port, json.dumps(payload).encode()) == 200
-    assert events.get(timeout=2) == (AgentEvent.BUSY, "big")
+    assert events.get(timeout=2) == (AgentEvent.BUSY, "big", "hook")
 
 
 def test_scan_payload_head_extracts_common_fields() -> None:
@@ -181,7 +181,7 @@ def test_second_server_on_same_port_fails_gracefully(server) -> None:
 def test_send_hook_event_tool_round_trip(server) -> None:
     srv, events = server
     assert send_hook_event("Notification", srv.port, TOKEN, "dev") == 200
-    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev")
+    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev", "hook")
     assert send_hook_event("Stop", srv.port, "bad", "dev") == 401
 
 
@@ -293,6 +293,31 @@ def test_busy_expires_after_silence() -> None:
     assert _run(ctrl, 1.0)[-1] == PetState.TYPING
     ctrl._clock += ctrl.interaction_cfg.agent_busy_expiry_s  # 3 minutes without hook events
     assert PetState.PUT_AWAY_LAPTOP in _run(ctrl, 2.0)
+
+
+def test_hooks_take_over_from_transcript_for_the_same_session() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s", "transcript")
+    assert _run(ctrl, 0.3)[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s", "hook")
+    ctrl.handle_agent_event(AgentEvent.DONE, "s", "hook")
+    # A lagging transcript reader still thinks the turn is running, then sees it end
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s", "transcript")
+    ctrl.handle_agent_event(AgentEvent.DONE, "s", "transcript")
+    states = _run(ctrl, 5.0)
+    assert states.count(PetState.CELEBRATE) == pytest.approx(ClawdletController.CELEBRATE_DURATION_S / DT, abs=2)
+    assert PetState.TYPING not in states[states.index(PetState.CELEBRATE):]
+
+
+def test_transcript_only_session_celebrates_once() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "t", "transcript")
+    _run(ctrl, 0.3)
+    ctrl.handle_agent_event(AgentEvent.DONE, "t", "transcript")
+    ctrl.handle_agent_event(AgentEvent.DONE, "t", "transcript")
+    states = _run(ctrl, 4.0)
+    first = states.index(PetState.CELEBRATE)
+    assert PetState.CELEBRATE not in states[first + int(ClawdletController.CELEBRATE_DURATION_S / DT) + 2:]
 
 
 def test_agent_events_ignored_while_airborne() -> None:

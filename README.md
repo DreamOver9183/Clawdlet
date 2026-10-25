@@ -53,12 +53,15 @@ Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://cod
 | `PostToolUseFailure` / `StopFailure` | Nervous **sweat** | 冒冷汗 |
 | `Notification` (permission / input needed) | Bobbing golden **`!`** until you respond or click Clawd | 頭上跳「!」 |
 
-Setup | 設定方式:
-1. Start Clawdlet once (it creates a private token at `%APPDATA%\Clawdlet\hook_token`).
-2. Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)**, or run `clawdlet --print-hook-config`.
-3. Merge the printed `hooks` block into `~/.claude/settings.json`.
+Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Code 分頁都適用）:
 
-The receiver only binds to localhost, requires the bearer token, reads nothing but `hook_event_name` and `session_id`, never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
+1. **Zero-config (default) | 零設定**: Clawdlet watches recently active Claude Code session transcripts (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR`) and reacts with typing and a victory dance. It only reads the record *types* near the end of each file (`api-request`, `tool_use`, `end_turn`…), never their content. It cannot see permission prompts (no `!`), and the transcript format is internal to Claude Code, so it is best-effort. Disable with `--no-transcript-watch`.
+2. **One-click install | 一鍵安裝（推薦）**: Tray menu → **安裝 Claude Code hooks (Install Hooks)** (asks for confirmation) or `clawdlet --install-hooks`. Clawdlet backs up `~/.claude/settings.json` to `settings.json.clawdlet-bak-<timestamp>`, adds only its own `http` entries pointing at `127.0.0.1`, and leaves everything else untouched. Remove them again from the same tray item or with `clawdlet --uninstall-hooks`.
+3. **Manual | 手動**: Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)** or `clawdlet --print-hook-config`, then merge the `hooks` block yourself.
+
+When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice.
+
+The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Clawdlet\hook_token`), reads nothing but `hook_event_name` and `session_id`, never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
 
 ---
 
@@ -89,6 +92,9 @@ clawdlet --scale 2 --spawn claude          # Spawn above Claude Desktop at 2x (1
 clawdlet --mode hyper                      # Start directly in Hyper Mode (過動模式)
 clawdlet --click-through                   # Start with mouse click-through lock enabled
 clawdlet --debug                           # Show live state & HWND debug banner
+clawdlet --install-hooks                   # Add Clawdlet's hooks to ~/.claude/settings.json (with backup)
+clawdlet --uninstall-hooks                 # Remove them again (with backup)
+clawdlet --no-transcript-watch             # Don't watch Claude Code transcripts (zero-config fallback)
 clawdlet --print-hook-config               # Print the Claude Code hooks block for ~/.claude/settings.json
 clawdlet --hook-port 47821                 # Port for the Claude Code hook receiver (default 47821)
 clawdlet --no-hooks                        # Don't start the hook receiver

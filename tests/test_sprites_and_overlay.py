@@ -148,7 +148,7 @@ def test_overlay_and_in_process_win32_tracker(tmp_path: Path) -> None:
 def test_app_short_run_lifecycle() -> None:
     from clawdlet.app import main
 
-    rc = main(["--duration", "0.12", "--scale", "2", "--spawn", "center", "--no-hooks"])
+    rc = main(["--duration", "0.12", "--scale", "2", "--spawn", "center", "--no-hooks", "--no-transcript-watch"])
     assert rc == 0
 
 

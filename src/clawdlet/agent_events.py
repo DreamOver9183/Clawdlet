@@ -25,6 +25,7 @@ _HEAD_FIELD_RE = {
     for key in ("hook_event_name", "session_id")
 }
 DEFAULT_SESSION = "default"
+HOOK_SOURCE = "hook"
 
 
 class AgentEvent(str, Enum):
@@ -101,6 +102,8 @@ class AgentActivity:
     def __init__(self, busy_expiry_s: float = 180.0) -> None:
         self.busy_expiry_s = busy_expiry_s
         self._busy_since_event: dict[str, float] = {}
+        # Sessions that have delivered real hook events: transcript guesses are ignored for them
+        self.hook_sessions: set[str] = set()
 
     def is_session_busy(self, session_id: str, now: float) -> bool:
         last = self._busy_since_event.get(session_id)
@@ -233,7 +236,7 @@ class _HookRequestHandler(BaseHTTPRequestHandler):
                 return
         mapped = map_hook_payload(payload)
         if mapped is not None:
-            self.server.events.put(mapped)
+            self.server.events.put((*mapped, HOOK_SOURCE))
         self._reply(200)
 
     def _drain_body(self, length: int) -> bytes:

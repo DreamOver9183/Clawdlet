@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 import random
 
-from clawdlet.agent_events import AgentActivity, AgentEvent
+from clawdlet.agent_events import HOOK_SOURCE, AgentActivity, AgentEvent
 from clawdlet.config import (
     ACTIVITY_PROFILES,
     ActivityMode,
@@ -479,8 +479,16 @@ class ClawdletController:
         self._set_state(PetState.PETTED)
         return True
 
-    def handle_agent_event(self, event: AgentEvent, session_id: str) -> None:
-        """React to a Claude Code hook event (busy typing is picked up through ``_is_thinking``)."""
+    def handle_agent_event(self, event: AgentEvent, session_id: str, source: str = HOOK_SOURCE) -> None:
+        """React to a Claude Code activity event (busy typing is picked up through ``_is_thinking``).
+
+        Hooks are authoritative: once a session has sent a hook event, transcript-derived events
+        for it are dropped so the two sources can never double-celebrate or flip-flop.
+        """
+        if source == HOOK_SOURCE:
+            self.agent.hook_sessions.add(session_id)
+        elif session_id in self.agent.hook_sessions:
+            return
         win = self._last_win
         was_busy = self.agent.note(event, session_id, self._clock)
 

@@ -30,6 +30,7 @@ CMD_TOGGLE_PEEK = 1041
 CMD_TOGGLE_WINDOW_PUSH = 1042
 CMD_COPY_HOOK_CONFIG = 1051
 CMD_HOOK_STATUS = 1052  # Disabled informational row
+CMD_TOGGLE_HOOK_INSTALL = 1053
 CMD_EXIT = 1099
 
 
@@ -52,6 +53,21 @@ class TrayMenuState:
     peek_mode: bool = False
     window_push: bool = False
     hooks_status: str = "Claude Code Hooks：關閉 (Off)"
+    hooks_installed: bool = False
+
+
+def confirm_dialog(text: str, title: str = "Clawdlet") -> bool:
+    """Blocking Yes/No question; True only when the user explicitly answers Yes."""
+    try:
+        answer = win32api.MessageBox(
+            0,
+            text,
+            title,
+            win32con.MB_YESNO | win32con.MB_ICONQUESTION | win32con.MB_TOPMOST | win32con.MB_SETFOREGROUND,
+        )
+    except Exception:
+        return False
+    return answer == win32con.IDYES
 
 
 def copy_text_to_clipboard(text: str) -> bool:
@@ -256,6 +272,15 @@ class Win32TrayIcon:
             win32con.MF_STRING | win32con.MF_GRAYED,
             CMD_HOOK_STATUS,
             self.state.hooks_status,
+        )
+        install_flags = win32con.MF_STRING | (
+            win32con.MF_CHECKED if self.state.hooks_installed else win32con.MF_UNCHECKED
+        )
+        win32gui.AppendMenu(
+            menu,
+            install_flags,
+            CMD_TOGGLE_HOOK_INSTALL,
+            "安裝 Claude Code hooks（~/.claude/settings.json）(Install Hooks)",
         )
         win32gui.AppendMenu(
             menu,
