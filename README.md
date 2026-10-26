@@ -200,6 +200,14 @@ pip install -e ".[dev]"
 python -m pytest -v
 ```
 
+Some tests and behaviours need a real Windows desktop (Tk display, system tray, live Claude Desktop). Run through the **[Windows test checklist](docs/windows-test-checklist.md)** before a release. ｜ 部分測試與行為需要真的 Windows 桌面（Tk 顯示、系統匣、執行中的 Claude Desktop），發版前請照 **[Windows 實機測試清單](docs/windows-test-checklist.md)** 跑一遍。
+
+---
+
+## 🙏 Acknowledgements | 銘謝
+
+Clawdlet's behaviour design was inspired by **Shimeji-ee**, **Microsoft Agent**, **oneko**, **eSheep**, **VPet**, **clawd-on-desk** and **Desktop Goose**, among others — design ideas only, no code or art was copied. See **[docs/ACKNOWLEDGEMENTS.md](docs/ACKNOWLEDGEMENTS.md)** for what came from where, and **[docs/plans/m6-plan.md](docs/plans/m6-plan.md)** for the M6 plan record. ｜ Clawdlet 的行為設計受到上述專案啟發（僅參考設計概念，未使用其程式碼或素材），詳見銘謝清單與 M6 計畫紀錄。
+
 ---
 
 ## ⚖️ Legal Disclaimer & Dual-Licensing | 免責聲明與雙重授權

@@ -172,4 +172,4 @@ directory are provided strictly for personal, non-commercial use.
   * **Phase 4 — 活動感知動作**：工作休息（伸懶腰／托腮／喝咖啡）、subagent 拋球、PreCompact 蛻殼、警示揮手升級、錯誤連鎖（困惑 → 冒汗 → 沮喪），以及「更新 hooks」偵測。
   * **Phase 5 — 分層閒置與位置感知**：L1 張望眨眼、L2 看卷軸／擦爪子／挖沙、標題列晃腳與探頭、抓牆與敲視窗。
   * **Phase 6 — 登場／道別／送信／傾聽**：三種登場方式（避開相鄰螢幕的一側）、Exit 揮手道別、離開時送信（點信封會把 Claude Desktop 拉到前景）、打字時歪頭傾聽（不讀按鍵）；CLI `--no-mail`／`--no-listen` 與對應的 Tray 開關。
-  * **致謝與參考專案**：行為表與 NextBehavior 鏈結參考 **Shimeji-ee**；警示的 GetAttention → Continued → Return 升級參考 **Microsoft Agent**；機會觸發的小動作與追游標參考 **oneko**；登場 spawn 表參考 **eSheep**；L2 動作的 Start → Loop 分段動畫參考 **VPet**；Claude Code hook 連動與狀態對應參考 **clawd-on-desk**；送信參考 **Desktop Goose**。以上皆只參考設計概念，未使用其程式碼或素材。
+  * **致謝與參考專案**：行為表與 NextBehavior 鏈結參考 **Shimeji-ee**；警示的 GetAttention → Continued → Return 升級參考 **Microsoft Agent**；機會觸發的小動作與追游標參考 **oneko**；登場 spawn 表參考 **eSheep**；L2 動作的 Start → Loop 分段動畫參考 **VPet**；Claude Code hook 連動與狀態對應參考 **clawd-on-desk**；送信參考 **Desktop Goose**。以上皆只參考設計概念，未使用其程式碼或素材。完整清單見 [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md)；規劃與實作過程見 [plans/m6-plan.md](plans/m6-plan.md)；Windows 實機驗證見 [windows-test-checklist.md](windows-test-checklist.md)。
