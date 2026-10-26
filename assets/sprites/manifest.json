@@ -197,6 +197,167 @@
       "fps": 6.0,
       "loop": true,
       "loop_start": 0
+    },
+    "typing_loop": {
+      "file": "typing_loop.png",
+      "frames": 8,
+      "fps": 5.5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "work_glance": {
+      "file": "work_glance.png",
+      "frames": 4,
+      "fps": 5.3,
+      "loop": true,
+      "loop_start": 0
+    },
+    "work_stretch": {
+      "file": "work_stretch.png",
+      "frames": 6,
+      "fps": 4.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "work_think": {
+      "file": "work_think.png",
+      "frames": 6,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "work_sip": {
+      "file": "work_sip.png",
+      "frames": 8,
+      "fps": 4.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "juggle": {
+      "file": "juggle.png",
+      "frames": 8,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "molt": {
+      "file": "molt.png",
+      "frames": 8,
+      "fps": 5.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "molt_shell": {
+      "file": "molt_shell.png",
+      "frames": 6,
+      "fps": 2.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "alert_wave": {
+      "file": "alert_wave.png",
+      "frames": 6,
+      "fps": 6.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "alert_tap": {
+      "file": "alert_tap.png",
+      "frames": 4,
+      "fps": 6.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "confused": {
+      "file": "confused.png",
+      "frames": 6,
+      "fps": 4.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "sad": {
+      "file": "sad.png",
+      "frames": 6,
+      "fps": 3.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "read_scroll": {
+      "file": "read_scroll.png",
+      "frames": 8,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 3
+    },
+    "polish_claw": {
+      "file": "polish_claw.png",
+      "frames": 6,
+      "fps": 4.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "dig_sand": {
+      "file": "dig_sand.png",
+      "frames": 6,
+      "fps": 6.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "perch_dangle": {
+      "file": "perch_dangle.png",
+      "frames": 6,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "perch_peer": {
+      "file": "perch_peer.png",
+      "frames": 6,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "wall_scratch": {
+      "file": "wall_scratch.png",
+      "frames": 6,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "wave_goodbye": {
+      "file": "wave_goodbye.png",
+      "frames": 6,
+      "fps": 5.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "walk_mail": {
+      "file": "walk_mail.png",
+      "frames": 8,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "hold_mail": {
+      "file": "hold_mail.png",
+      "frames": 4,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "give_mail": {
+      "file": "give_mail.png",
+      "frames": 4,
+      "fps": 5.0,
+      "loop": false,
+      "loop_start": 0
+    },
+    "listen_tilt": {
+      "file": "listen_tilt.png",
+      "frames": 4,
+      "fps": 2.5,
+      "loop": true,
+      "loop_start": 0
     }
   }
 }
