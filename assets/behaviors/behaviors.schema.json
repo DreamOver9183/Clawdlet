@@ -29,7 +29,8 @@
         "PETTED", "FLAIL", "YAWN", "SLEEP", "WAKE_STARTLE", "PEEK_EDGE", "CELEBRATE", "ERROR_SWEAT",
         "ALERT", "PUSH_WINDOW", "WORK_GLANCE", "WORK_STRETCH", "WORK_THINK", "WORK_SIP", "JUGGLE",
         "MOLT", "CONFUSED", "SAD", "READ_SCROLL", "POLISH_CLAW", "DIG_SAND", "PERCH_DANGLE",
-        "PERCH_PEER", "WALL_SCRATCH"
+        "PERCH_PEER", "WALL_SCRATCH", "ENTER_WALK", "GOODBYE", "MAIL_CARRY", "MAIL_WAIT", "MAIL_GIVE",
+        "LISTEN"
       ]
     },
     "span": {
@@ -194,7 +195,7 @@
       "properties": {
         "idle_level2_after_s": {"type": "number", "minimum": 0, "description": "User idle seconds before idle level 2."},
         "fidget_interval_s": {"$ref": "#/$defs/span", "description": "Seconds between fidgets (glances, blinks) while resting, [min, max]."},
-        "mail_away_s": {"type": "number", "minimum": 0},
+        "mail_away_s": {"type": "number", "minimum": 0, "description": "User idle seconds at the end of a Claude Code turn after which Clawd keeps a letter for you instead of celebrating."},
         "alert_escalate_s": {"type": "number", "minimum": 0, "description": "Seconds an unanswered '!' waits before Clawd starts waving (2 s wave, 4 s '!', repeating)."},
         "work": {
           "type": "object",

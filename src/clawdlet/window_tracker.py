@@ -283,6 +283,28 @@ def get_physical_work_area() -> Rect:
     return Rect(0.0, 0.0, float(w), float(h))
 
 
+SM_CXSCREEN = 0
+SM_CYSCREEN = 1
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+
+def get_physical_screen_rects() -> tuple[Rect, Rect] | None:
+    """(primary monitor, virtual screen spanning every monitor) in physical pixels, or None."""
+    try:
+        metric = ctypes.windll.user32.GetSystemMetrics
+        primary = Rect(0.0, 0.0, float(metric(SM_CXSCREEN)), float(metric(SM_CYSCREEN)))
+        vx, vy = float(metric(SM_XVIRTUALSCREEN)), float(metric(SM_YVIRTUALSCREEN))
+        vw, vh = float(metric(SM_CXVIRTUALSCREEN)), float(metric(SM_CYVIRTUALSCREEN))
+    except Exception:
+        return None
+    if primary.width <= 0 or vw <= 0 or vh <= 0:
+        return None
+    return primary, Rect(vx, vy, vx + vw, vy + vh)
+
+
 class Win32ClaudeTracker:
     """Tracks the active Claude Desktop window with PID caching and DWM bounds."""
 

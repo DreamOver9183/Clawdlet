@@ -88,6 +88,7 @@ def test_default_table_validates_without_warnings_and_matches_legacy() -> None:
     assert table.behaviors == LEGACY_TABLE.behaviors
     assert table.work_breaks == LEGACY_TABLE.work_breaks
     assert table.fidgets == LEGACY_TABLE.fidgets
+    assert table.entrances == LEGACY_TABLE.entrances
     assert table.settings == LEGACY_TABLE.settings
     assert validate_default_behaviors(REPO) == []
 

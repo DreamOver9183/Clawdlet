@@ -52,6 +52,18 @@ _PERCH_EDGE_FRACTION = 0.25  # Of the body width, from either end of the title b
 # edge while the physics body stays on top of it
 _RENDER_DY_SPRITE_PX = {"perch_dangle": 8, "perch_peer": 10}
 
+# Entrance kinds (rows of the behavior table's ``entrances`` section, eSheep's spawn table)
+ENTRANCE_DROP_ON_CLAUDE = "drop_on_claude"
+ENTRANCE_DROP_TOP = "drop_top"
+ENTRANCE_WALK_IN_SIDE = "walk_in_side"
+SCREEN_SIDES = (-1, 1)  # -1 left edge, +1 right edge
+
+# Listening: input pulses (user idle time resetting while the cursor stays put) are counted over
+# this window; this many of them with a cursor still for LISTEN_STILL_S looks like typing
+LISTEN_PULSE_WINDOW_S = 2.0
+LISTEN_MIN_PULSES = 3
+LISTEN_STILL_S = 0.6
+
 # Gaze strip poses used outside the 3x3 look grid
 _GAZE_AHEAD = 4
 _GAZE_DOWN = 7
@@ -85,6 +97,9 @@ _IDLE_ACTION_STATES = frozenset({
 # Resting states that may doze off, pounce, or decide on a new activity
 _REST_STATES = frozenset({PetState.IDLE, PetState.BLOB, PetState.PERCH_CLAUDE, *_IDLE_ACTION_STATES})
 
+# Mail delivery (Desktop Goose style): carry the envelope to the cursor, hold it up, hand it over
+_MAIL_STATES = frozenset({PetState.MAIL_CARRY, PetState.MAIL_WAIT, PetState.MAIL_GIVE})
+
 # Resting states that idly glance around and blink (L1 fidgets, cosmetic only)
 _FIDGET_STATES = frozenset({PetState.IDLE, PetState.PERCH_CLAUDE})
 
@@ -104,6 +119,7 @@ _STATIONARY_STATES = frozenset({
     PetState.MOLT,
     PetState.CONFUSED,
     PetState.SAD,
+    PetState.GOODBYE,
 })
 
 # States a work session (Claude thinking / agent busy / manual typing) may interrupt to pull out the
@@ -119,6 +135,7 @@ _WORK_ENTRY_STATES = frozenset({
     PetState.SLEEP,
     PetState.WAKE_STARTLE,
     PetState.PUSH_WINDOW,
+    PetState.LISTEN,
     *_IDLE_ACTION_STATES,
 })
 
@@ -141,6 +158,8 @@ _UNREACTIVE_STATES = frozenset({
     PetState.DIZZY,
     PetState.CLIMB,
     PetState.POUNCE,
+    PetState.ENTER_WALK,
+    PetState.GOODBYE,
 })
 
 # Laptop out (never flipped; tantrums and petting are ignored)
@@ -158,6 +177,8 @@ _PERCH_TICK_STATES = frozenset({
     *_IDLE_ACTION_STATES,
     *_LAPTOP_STATES,
     *_STATIONARY_STATES,
+    *_MAIL_STATES,
+    PetState.LISTEN,
 })
 
 
@@ -196,6 +217,65 @@ def drop_y_above_window(
         return max(work_area.top, rest_y - clearance)
     highest_y = min(work_area.top, rest_y)
     return max(highest_y, rest_y - clearance)
+
+
+def choose_entrance(
+    table: BehaviorTable,
+    win: WindowSnapshot | None,
+    rng: random.Random,
+    sides: tuple[int, ...] = SCREEN_SIDES,
+    exclude: frozenset[str] | tuple[str, ...] = (),
+    mode: str = "normal",
+) -> str:
+    """eSheep-style spawn table: weighted pick of an enabled ``entrances`` row whose ``when`` holds.
+
+    Whatever a row's ``when`` says, ``drop_on_claude`` needs a perchable Claude window and
+    ``walk_in_side`` an open screen side in ``sides`` (one that does not border another monitor).
+    Kinds in ``exclude`` sit out. Falls back to ``drop_top`` when nothing is eligible. Draws one
+    ``rng.random()`` per pick (none for the fallback).
+    """
+    visible = win is not None and win.is_perchable
+    ctx = IdleContext(
+        surface="floor",
+        spots=frozenset({"open"}),
+        mode=mode,
+        claude_visible=visible,
+        claude_foreground=bool(win is not None and win.foreground),
+        trigger="entrance",
+    )
+    pool: list[tuple[str, float]] = []
+    for row in table.entrances:
+        if not row.enabled or row.kind in exclude or not row.when.matches(ctx):
+            continue
+        if row.kind == ENTRANCE_DROP_ON_CLAUDE and not visible:
+            continue
+        if row.kind == ENTRANCE_WALK_IN_SIDE and not sides:
+            continue
+        weight = row.weight_for(mode)
+        if weight > 0.0:
+            pool.append((row.kind, weight))
+    if not pool:
+        return ENTRANCE_DROP_TOP
+    target = rng.random() * sum(w for _, w in pool)
+    cum = 0.0
+    for kind, weight in pool:
+        cum += weight
+        if target < cum:
+            return kind
+    return pool[-1][0]
+
+
+@dataclass
+class MailState:
+    """A finished turn's "letter", kept because the user was away when Claude finished."""
+
+    session: str
+    created_at: float
+    delivered_at: float | None = None  # When Clawd set off with it (the timeout counts from here)
+
+
+def _no_focus(_hwnd: int) -> None:
+    """Default window focuser: tests and headless controllers never steal focus."""
 
 
 @dataclass(frozen=True)
@@ -263,6 +343,16 @@ class ClawdletController:
     ALERT_HOLD_S: float = 4.0            # ...then plain '!' this long, repeating
     GAZE_BLINK_S: float = 0.12
     CHASE_SPEED_MULT: float = 1.40       # Chasing the cursor is an excited trot
+    # Milestone 6 entrances, goodbye, mail delivery and listening
+    ENTER_DROP_CLEARANCE_PX: float = 140.0
+    ENTER_WANDER_S: tuple[float, float] = (1.0, 2.0)  # Keep strolling this long after walking in
+    ENTER_WALK_MAX_S: float = 10.0       # Safety net: walking in never takes longer than this
+    GOODBYE_DURATION_S: float = 1.20     # wave_goodbye: 6 frames @ 5 FPS
+    GOODBYE_HOLD_S: float = 5.0          # If the app is still running by then, carry on
+    MAIL_CARRY_SPEED_MULT: float = 1.40  # Hurrying over with the letter
+    MAIL_GIVE_S: float = 0.80            # give_mail: 4 frames @ 5 FPS
+    MAIL_TIMEOUT_S: float = 90.0         # Undelivered this long after setting off: the letter is gone
+    LISTEN_LINGER_S: float = 1.50        # Stop listening this long after the last input pulse
 
     def __init__(
         self,
@@ -385,6 +475,17 @@ class ClawdletController:
         self._push_moved_px: int = 0
         self._push_carry_px: float = 0.0
 
+        # Entrances, mail delivery and listening (Milestone 6). The app injects focus_window;
+        # tests inject a fake. Their randomness uses _behavior_rng, never _rng.
+        self.window_focuser: Callable[[int], object] = _no_focus
+        self.mail_enabled: bool = True
+        self.listen_enabled: bool = True
+        self._mail: MailState | None = None
+        self._claude_hwnd_hint: int | None = None  # Last perchable Claude window (focused on delivery)
+        self._enter_side: int = -1
+        self._input_pulses: deque[float] = deque()
+        self._last_pulse_t: float = float("-inf")
+
     @property
     def profile(self) -> ActivityProfile:
         return ACTIVITY_PROFILES[self.activity_mode]
@@ -470,6 +571,240 @@ class ClawdletController:
             self.body.vy = 0.0
         else:
             self.summon_to_center()
+
+    # --- Milestone 6: entrances and goodbye -----------------------------------------------------
+
+    def enter_random(
+        self,
+        win: WindowSnapshot | None,
+        sides: tuple[int, ...] = SCREEN_SIDES,
+        exclude: frozenset[str] | tuple[str, ...] = (),
+    ) -> str:
+        """Arrive on screen the way the ``entrances`` table picks (``_behavior_rng``); return the kind."""
+        kind = choose_entrance(
+            self.behavior_table, win, self._behavior_rng, sides, exclude, self.activity_mode.value
+        )
+        self.enter(kind, win, sides)
+        return kind
+
+    def enter(self, kind: str, win: WindowSnapshot | None = None, sides: tuple[int, ...] = SCREEN_SIDES) -> None:
+        """Start an entrance: drop onto Claude's title bar, fall from the screen top at a random x,
+        or walk in from beyond a screen side in ``sides``. Unusable kinds fall back to ``drop_top``.
+
+        Called explicitly by the app (never by the constructor), so a directly constructed
+        controller keeps its exact spawn position.
+        """
+        self._detach_to_fall()
+        self._seeking_push = False
+        self._push_plan = None
+        self._peek_seek_side = 0
+        self.body.vx = 0.0
+        self.body.vy = 0.0
+        area = self.work_area
+        if kind == ENTRANCE_DROP_ON_CLAUDE and win is not None and win.is_perchable:
+            self.body.x = win.rect.clamp_x(win.rect.center_x - self.body.width * 0.5, self.body.width)
+            self.body.y = drop_y_above_window(
+                win.rect, self.body.height, area, self.ENTER_DROP_CLEARANCE_PX
+            )
+            return
+        if kind == ENTRANCE_WALK_IN_SIDE and sides:
+            side = sides[0] if len(sides) == 1 else self._behavior_rng.choice(tuple(sides))
+            self._start_enter_walk(side)
+            return
+        # drop_top
+        hi = max(area.left, area.right - self.body.width)
+        self.body.x = self._behavior_rng.uniform(area.left, hi)
+        self.body.y = area.top
+
+    def _start_enter_walk(self, side: int) -> None:
+        """Stand on the floor just beyond the ``side`` screen edge, facing in."""
+        area = self.work_area
+        self._enter_side = -1 if side < 0 else 1
+        self.facing = -self._enter_side
+        self.body.x = area.left - self.body.width if side < 0 else area.right
+        self.body.y = area.bottom - self.body.height
+        self.body.vx = float(self.facing) * self.effective_walk_speed
+        self.body.vy = 0.0
+        self.body.grounded = True
+        self.body.on_platform_id = "floor"
+        self._set_state(PetState.ENTER_WALK, self.ENTER_WALK_MAX_S)
+
+    def _tick_enter_walk(self, dt: float, win: WindowSnapshot | None, win_vel: Vec2) -> RenderFrameState:
+        """Walk in along the floor. Runs instead of the physics step, whose wall clamp would
+        otherwise teleport the off-screen body inside; ends in a short WANDER once fully in."""
+        area = self.work_area
+        self.facing = -self._enter_side
+        speed = self.effective_walk_speed
+        self.body.x += self.facing * speed * dt
+        self.body.y = area.bottom - self.body.height
+        self.body.vx = float(self.facing) * speed
+        self.body.vy = 0.0
+        self.body.grounded = True
+        self.body.on_platform_id = "floor"
+        inside = self.body.x >= area.left if self.facing > 0 else self.body.right <= area.right
+        if inside or self._state_timer >= self._decision_duration:
+            self.body.x = area.clamp_x(self.body.x, self.body.width)
+            self._seeking_claude = False
+            self._set_state(PetState.WANDER, self._behavior_rng.uniform(*self.ENTER_WANDER_S))
+        return self._build_render_state(win, win_vel)
+
+    def begin_goodbye(self) -> float:
+        """Tray Exit: wave goodbye. Return how long the wave takes, or 0 to close right away
+        (held, airborne, climbing or still walking in)."""
+        if (
+            self.state in (PetState.DRAGGED, PetState.CLIMB, PetState.ENTER_WALK)
+            or self.state in (PetState.FALLING, PetState.THROWN)
+            or not self.body.grounded
+        ):
+            return 0.0
+        self.manual_typing = False
+        self._seeking_push = False
+        self._push_plan = None
+        self._seeking_claude = False
+        self._alert_session = None
+        self.body.vx = 0.0
+        self._set_state(PetState.GOODBYE, self.GOODBYE_DURATION_S)
+        return self.GOODBYE_DURATION_S
+
+    # --- Milestone 6: mail delivery and listening -----------------------------------------------
+
+    @property
+    def has_mail(self) -> bool:
+        return self._mail is not None
+
+    def set_mail_enabled(self, enabled: bool) -> None:
+        """Toggle mail delivery; turning it off drops a waiting letter."""
+        self.mail_enabled = bool(enabled)
+        if not self.mail_enabled:
+            self._drop_mail(self._last_win)
+
+    def set_listen_enabled(self, enabled: bool) -> None:
+        """Toggle listening while the user types into Claude Desktop."""
+        self.listen_enabled = bool(enabled)
+        if not self.listen_enabled and self.state == PetState.LISTEN:
+            self._return_to_rest(self._last_win)
+
+    def _user_away_for_mail(self) -> bool:
+        """Away long enough that a finished turn becomes a letter (no pointer sample = present)."""
+        p = self._pointer
+        return self.mail_enabled and p is not None and p.idle_s >= self.behavior_table.settings.mail_away_s
+
+    def _keep_mail(self, session_id: str, win: WindowSnapshot | None) -> None:
+        """A turn finished while the user was away: keep a letter instead of celebrating now."""
+        self._mail = MailState(session_id, self._clock)
+        if self.state in _WORK_STATES and not self._still_working(win):
+            self._start_stop_typing()  # Laptop away, no victory dance (the letter comes later)
+
+    def _drop_mail(self, win: WindowSnapshot | None) -> None:
+        self._mail = None
+        if self.state in (PetState.MAIL_CARRY, PetState.MAIL_WAIT):
+            self._return_to_rest(win)
+
+    def _mail_due(self) -> bool:
+        """A letter is waiting and the user is back: deliver it."""
+        return self._mail is not None and self.mail_enabled and self._user_active()
+
+    def _start_mail_carry(self) -> None:
+        mail = self._mail
+        assert mail is not None
+        if mail.delivered_at is None:
+            mail.delivered_at = self._clock
+        self._seeking_claude = False
+        self._seeking_push = False
+        self._push_plan = None
+        self._set_state(PetState.MAIL_CARRY, self.MAIL_TIMEOUT_S)
+
+    def _give_mail(self) -> None:
+        """Clicked while bringing the letter: hand it over (focus Claude Desktop when done)."""
+        self._mail = None
+        self.body.vx = 0.0
+        p = self._pointer
+        if p is not None and abs(p.x - self.body.center_x) > 1.0:
+            self.facing = 1 if p.x > self.body.center_x else -1
+        self._set_state(PetState.MAIL_GIVE, self.MAIL_GIVE_S)
+
+    def _cursor_target_x(self, win: WindowSnapshot | None, perched: bool) -> float | None:
+        """Body x that stands under the cursor on the current surface (None without a cursor)."""
+        p = self._pointer
+        if p is None:
+            return None
+        if perched and win is not None and win.is_perchable:
+            max_offset = max(0.0, win.rect.width - self.body.width)
+            return win.rect.left + max(0.0, min(max_offset, p.x - win.rect.left - self.body.width * 0.5))
+        return self.work_area.clamp_x(p.x - self.body.width * 0.5, self.body.width)
+
+    def _step_mail_carry(self, dt: float, win: WindowSnapshot | None, perched: bool) -> None:
+        """Walk the letter over to the cursor (along the title bar when perched)."""
+        if self._pointer is None:
+            self.body.vx = 0.0  # Cursor unavailable (e.g. lock screen): wait
+            return
+        if perched:
+            assert win is not None
+            arrived = self._perch_step_toward_cursor(dt, win, self.MAIL_CARRY_SPEED_MULT)
+        else:
+            arrived = self._floor_step_toward_cursor(dt, self.MAIL_CARRY_SPEED_MULT)
+        if arrived:
+            self.body.vx = 0.0
+            self._set_state(PetState.MAIL_WAIT, self.MAIL_TIMEOUT_S)
+
+    def _advance_mail(self, win: WindowSnapshot | None) -> None:
+        """Hand-over timer, the delivery timeout, and following a cursor that moved away."""
+        if self.state == PetState.MAIL_GIVE:
+            if self._state_timer >= self.MAIL_GIVE_S:
+                if self._claude_hwnd_hint is not None:
+                    self.window_focuser(self._claude_hwnd_hint)
+                self._set_state(PetState.CELEBRATE)
+            return
+        mail = self._mail
+        if mail is None or not self.mail_enabled:
+            self._drop_mail(win)
+            return
+        if mail.delivered_at is not None and self._clock - mail.delivered_at >= self.MAIL_TIMEOUT_S:
+            self._drop_mail(win)  # Nobody took it: back to resting, letter gone
+            return
+        if self.state == PetState.MAIL_WAIT:
+            self.body.vx = 0.0
+            p = self._pointer
+            if p is not None and abs(p.x - self.body.center_x) > 1.0:
+                self.facing = 1 if p.x > self.body.center_x else -1
+            target = self._cursor_target_x(win, perched=self._perched_hwnd is not None)
+            if target is not None and abs(target - self.body.x) > max(self.body.width * 1.5, 120.0):
+                self._set_state(PetState.MAIL_CARRY, self.MAIL_TIMEOUT_S)  # Follow the cursor
+
+    def _keyboardish(self) -> bool:
+        """Input keeps arriving while the cursor stays put: most likely typing. Only the fact that
+        *some* input happened is known (GetLastInputInfo); keys are never read."""
+        return len(self._input_pulses) >= LISTEN_MIN_PULSES and self._cursor_still_s >= LISTEN_STILL_S
+
+    def _should_listen(self, win: WindowSnapshot | None) -> bool:
+        return (
+            self.listen_enabled
+            and win is not None
+            and win.foreground
+            and win.is_perchable
+            and self._mail is None
+            and self._keyboardish()
+            and self._clock - self._last_pulse_t < self.LISTEN_LINGER_S
+            and not self._work.effective(self._work_signal(win), self._clock)
+        )
+
+    def _start_listen(self, win: WindowSnapshot) -> None:
+        """Tilt the head toward Claude's window (the strip looks right; flipped when it is left)."""
+        self.body.vx = 0.0
+        self.facing = 1 if win.rect.center_x >= self.body.center_x else -1
+        self._set_state(PetState.LISTEN, 60.0)
+
+    def _advance_listen(self, win: WindowSnapshot | None) -> None:
+        self.body.vx = 0.0
+        if (
+            not self.listen_enabled
+            or win is None
+            or not win.foreground
+            or self._mail is not None
+            or self._clock - self._last_pulse_t >= self.LISTEN_LINGER_S
+            or self._state_timer >= self._decision_duration
+        ):
+            self._return_to_rest(win)
 
     def hop(self, jump_vy: float = -650.0) -> None:
         """Trigger a playful vertical hop from the current position."""
@@ -595,8 +930,11 @@ class ClawdletController:
 
         While typing, Clawd only glances up from the laptop and then keeps working.
         """
-        if not self._can_react() or self.state == PetState.MOLT:
+        if not self._can_react() or self.state in (PetState.MOLT, PetState.MAIL_GIVE):
             return False
+        if self.state in (PetState.MAIL_CARRY, PetState.MAIL_WAIT):
+            self._give_mail()  # Takes the letter; Claude Desktop comes to the front after the hand-over
+            return True
         if self.state in _WORK_STATES:
             self._start_poke_glance()
             return True
@@ -613,6 +951,8 @@ class ClawdletController:
 
     def flail(self) -> bool:
         """Rapid clicks: throw a tantrum. Return True if it reacted."""
+        if self.state in _MAIL_STATES:
+            return self.poke()  # Clicking away at the letter still takes it
         if not self._can_react() or self.state in _LAPTOP_STATES or self.state == PetState.MOLT:
             return False
         self._alert_session = None
@@ -621,7 +961,7 @@ class ClawdletController:
 
     def pet(self) -> bool:
         """Stroking: glow with hearts; repeated strokes keep it going. Return True if it reacted."""
-        if not self._can_react() or self.state in _LAPTOP_STATES:
+        if not self._can_react() or self.state in _LAPTOP_STATES or self.state in _MAIL_STATES:
             return False
         if self.state in (PetState.FLAIL, PetState.ALERT, PetState.MOLT):
             return False
@@ -650,6 +990,12 @@ class ClawdletController:
             self._work.note_done(self._clock)  # Ignore the Claude Desktop I/O tail of the finished turn
         if event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END):
             self._error_streak.pop(session_id, None)  # The turn is over: the next failure starts fresh
+        if (
+            self._mail is not None
+            and session_id == self._mail.session
+            and self.agent.is_session_busy(session_id, self._clock)
+        ):
+            self._drop_mail(win)  # That session is at it again: the letter is out of date
 
         # Any follow-up from the session that raised the alert means it is no longer waiting
         if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING) and session_id == self._alert_session:
@@ -675,6 +1021,8 @@ class ClawdletController:
         elif event == AgentEvent.COMPACT:
             if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL, PetState.MOLT):
                 self._start_molt()
+        elif event == AgentEvent.DONE and was_busy and self._user_away_for_mail():
+            self._keep_mail(session_id, win)
         elif event == AgentEvent.DONE and was_busy:
             if self.state in _WORK_STATES and not self._still_working(win):
                 # Laptop away first (tuck or kick by mode), then the victory dance
@@ -935,6 +1283,10 @@ class ClawdletController:
         self._work_directive = WorkDirective.NONE
         state = self.state
         if state in _WORK_STATES:
+            if state != PetState.JUGGLE and not self.manual_typing and self._mail_due():
+                # The user is back and a letter is waiting: it beats typing (not juggling)
+                self._start_stop_typing()
+                return True
             if not self._work.active and not self.manual_typing:
                 # END / CAP (or the session wound down while Clawd was busy with something else)
                 self._start_stop_typing()
@@ -949,7 +1301,7 @@ class ClawdletController:
                 self._resume_typing()
                 return True
             return False
-        if state in _WORK_ENTRY_STATES and self._work_wanted():
+        if state in _WORK_ENTRY_STATES and self._work_wanted() and not self._mail_due():
             if self.manual_typing:
                 self._enter_manual_typing()
             else:
@@ -1024,10 +1376,18 @@ class ClawdletController:
     def _maybe_start_idle_behavior(self, win: WindowSnapshot | None) -> bool:
         """Per-tick checks from a resting state: doze off, or pounce at a resting cursor.
 
-        Return True when the state changed.
+        Also delivers a waiting letter once the user is back, and listens while they type into
+        Claude Desktop. Return True when the state changed.
         """
+        if self._mail_due():
+            self._start_mail_carry()
+            return True
         if self._should_sleep(win):
             self._set_state(PetState.YAWN)
+            return True
+        if self._should_listen(win):
+            assert win is not None
+            self._start_listen(win)
             return True
         if self._can_pounce():
             p = self._pointer
@@ -1203,38 +1563,44 @@ class ClawdletController:
         self._set_state(PetState.CHASE_CURSOR, self.interaction_cfg.chase_timeout_s)
         return True
 
-    def _step_perch_chase(self, dt: float, win: WindowSnapshot) -> None:
+    def _perch_step_toward_cursor(self, dt: float, win: WindowSnapshot, speed_mult: float) -> bool:
+        """Move along the title bar toward the cursor (needs a pointer). True once under it."""
         p = self._pointer
-        if p is None:
-            self._return_to_rest(win)
-            return
+        assert p is not None
         max_offset = max(0.0, win.rect.width - self.body.width)
         target = max(0.0, min(max_offset, p.x - win.rect.left - self.body.width * 0.5))
         diff = target - self._perch_offset_x
-        step = self.effective_walk_speed * self.CHASE_SPEED_MULT * dt
+        step = self.effective_walk_speed * speed_mult * dt
         if abs(diff) <= step:
             self._perch_offset_x = target
-            self._return_to_rest(win)
-            return
+            return True
         self.facing = 1 if diff > 0 else -1
         self._perch_offset_x += self.facing * step
-        if self._state_timer >= self._decision_duration:
+        return False
+
+    def _floor_step_toward_cursor(self, dt: float, speed_mult: float) -> bool:
+        """Set the floor walking velocity toward the cursor (needs a pointer). True once under it."""
+        p = self._pointer
+        assert p is not None
+        target = self.work_area.clamp_x(p.x - self.body.width * 0.5, self.body.width)
+        diff = target - self.body.x
+        speed = self.effective_walk_speed * speed_mult
+        if abs(diff) <= max(4.0, speed * dt * 1.5):
+            self.body.vx = 0.0
+            return True
+        self.facing = 1 if diff > 0 else -1
+        self.body.vx = float(self.facing) * speed
+        return False
+
+    def _step_perch_chase(self, dt: float, win: WindowSnapshot) -> None:
+        if self._pointer is None or self._perch_step_toward_cursor(dt, win, self.CHASE_SPEED_MULT):
+            self._return_to_rest(win)
+        elif self._state_timer >= self._decision_duration:
             self._return_to_rest(win)
 
     def _step_floor_chase(self, dt: float, win: WindowSnapshot | None) -> None:
-        p = self._pointer
-        if p is None:
+        if self._pointer is None or self._floor_step_toward_cursor(dt, self.CHASE_SPEED_MULT):
             self._return_to_rest(win)
-            return
-        target = self.work_area.clamp_x(p.x - self.body.width * 0.5, self.body.width)
-        diff = target - self.body.x
-        speed = self.effective_walk_speed * self.CHASE_SPEED_MULT
-        if abs(diff) <= max(4.0, speed * dt * 1.5):
-            self.body.vx = 0.0
-            self._return_to_rest(win)
-            return
-        self.facing = 1 if diff > 0 else -1
-        self.body.vx = float(self.facing) * speed
 
     def _advance_reaction(self, win: WindowSnapshot | None) -> None:
         """Advance timers and exits of the stationary reaction states."""
@@ -1274,6 +1640,10 @@ class ClawdletController:
         elif s == PetState.ALERT:
             if t >= self.interaction_cfg.alert_timeout_s:
                 self._alert_session = None
+                self._return_to_rest(win)
+        elif s == PetState.GOODBYE:
+            # The wave holds its last frame while the app closes; if it is still running, carry on
+            if t >= self.GOODBYE_HOLD_S:
                 self._return_to_rest(win)
 
     def _cursor_near(self, margin: float) -> bool:
@@ -1527,6 +1897,9 @@ class ClawdletController:
             # Double-clicked again while putting the laptop away: pull it straight back out
             self._enter_manual_typing()
             return
+        if self._mail_due():
+            self._start_mail_carry()
+            return
         if self._pending_celebrate:
             self._pending_celebrate = False
             self._set_state(PetState.CELEBRATE)
@@ -1583,6 +1956,9 @@ class ClawdletController:
         chain_from = self._take_active_row()
         if self.manual_typing:
             self._enter_manual_typing()
+            return
+        if self._mail_due():
+            self._start_mail_carry()
             return
         if self._pending_celebrate:
             self._pending_celebrate = False
@@ -1719,6 +2095,8 @@ class ClawdletController:
             self._enter_manual_typing()
         elif self.state == PetState.CHASE_CURSOR:
             self._step_perch_chase(dt, win)
+        elif self.state == PetState.MAIL_CARRY:
+            self._step_mail_carry(dt, win, perched=True)
         elif self.state == PetState.WANDER:
             step_dx = float(self.facing) * (self.effective_walk_speed * 0.75) * dt
             self._perch_offset_x += step_dx
@@ -1748,6 +2126,10 @@ class ClawdletController:
             self._advance_work_break(win)
         elif self.state == PetState.JUGGLE:
             self._advance_juggle(win)
+        elif self.state in _MAIL_STATES:
+            self._advance_mail(win)
+        elif self.state == PetState.LISTEN:
+            self._advance_listen(win)
         elif self._state_timer >= self._decision_duration:
             self._transition_from_perch(win)
         if self._perched_hwnd is None:
@@ -1794,6 +2176,19 @@ class ClawdletController:
         return self._build_render_state(win, win_vel)
 
     def _update_pointer(self, dt: float, pointer: PointerSnapshot | None) -> None:
+        # Input pulses (listening): the user's idle time went back down although the cursor did not
+        # move, so a key (or a click / scroll wheel) was used. Only that fact is kept, never a key.
+        prev = self._pointer
+        if (
+            pointer is not None
+            and prev is not None
+            and abs(pointer.x - prev.x) + abs(pointer.y - prev.y) <= 0.5
+            and pointer.idle_s < prev.idle_s - 1e-3
+        ):
+            self._input_pulses.append(self._clock)
+            self._last_pulse_t = self._clock
+        while self._input_pulses and self._clock - self._input_pulses[0] > LISTEN_PULSE_WINDOW_S:
+            self._input_pulses.popleft()
         # Stillness is measured against an anchor so slow drift still counts as movement
         anchor = self._cursor_anchor
         if pointer is None:
@@ -1833,6 +2228,8 @@ class ClawdletController:
         self._state_timer += dt
         self._update_pointer(dt, pointer)
         self._last_win = win
+        if win is not None and win.is_perchable:
+            self._claude_hwnd_hint = win.hwnd
         self._tick_projectile(dt)
         self._tick_shell(dt, win)
         # Work session first: the perch / floor paths below apply its directive via _step_work
@@ -1849,6 +2246,11 @@ class ClawdletController:
         # 2. Handle CLIMB state (gravity suspended while gripping edge)
         if self.state == PetState.CLIMB:
             return self._tick_climb(dt, win, win_vel)
+
+        # 2a. Walking in from beyond a screen edge (instead of physics, whose wall clamp would
+        # pull the off-screen body inside at once)
+        if self.state == PetState.ENTER_WALK:
+            return self._tick_enter_walk(dt, win, win_vel)
 
         # 3. Handle states perched on Claude Desktop's top border
         if self._perched_hwnd is not None and self.state in _PERCH_TICK_STATES:
@@ -1885,6 +2287,10 @@ class ClawdletController:
             self.body.vx = 0.0
         if on_floor and self.state == PetState.CHASE_CURSOR:
             self._step_floor_chase(dt, win)
+        if on_floor and self.state == PetState.MAIL_CARRY:
+            self._step_mail_carry(dt, win, perched=False)
+        if on_floor and self.state in (PetState.MAIL_WAIT, PetState.MAIL_GIVE, PetState.LISTEN):
+            self.body.vx = 0.0
         if on_floor and self.state == PetState.WANDER and self._seeking_push:
             self._step_seek_push(dt, win)
         if on_floor and self.state == PetState.PUSH_WINDOW:
@@ -1969,6 +2375,10 @@ class ClawdletController:
                 self._state_timer = 0.0
             elif self.state in _STATIONARY_STATES:
                 self._advance_reaction(win)
+            elif self.state in _MAIL_STATES:
+                self._advance_mail(win)
+            elif self.state == PetState.LISTEN:
+                self._advance_listen(win)
             elif self.body.on_platform_id == "claude_window" and win is not None and win.is_perchable:
                 self.state = PetState.PERCH_CLAUDE
                 self._perched_hwnd = win.hwnd

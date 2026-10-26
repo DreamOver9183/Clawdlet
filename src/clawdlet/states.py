@@ -52,12 +52,19 @@ class PetState(str, Enum):
     PERCH_DANGLE = "perch_dangle"  # Sit at the end of the title bar, legs dangling over its edge
     PERCH_PEER = "perch_peer"      # Lean over the title bar to peer into the window at the cursor
     WALL_SCRATCH = "wall_scratch"  # Scratch at a screen wall / drum on the side of Claude's window
+    # Milestone 6 entrances, goodbye, mail delivery and listening
+    ENTER_WALK = "enter_walk"      # Walk in from beyond a screen edge (renders walk_horizontal)
+    GOODBYE = "wave_goodbye"       # Tray Exit: wave goodbye before the app closes
+    MAIL_CARRY = "walk_mail"       # A turn finished while you were away: bring the envelope over
+    MAIL_WAIT = "hold_mail"        # Hold the envelope up near the cursor until clicked
+    MAIL_GIVE = "give_mail"        # Hand the envelope over (then Claude Desktop comes to the front)
+    LISTEN = "listen_tilt"         # Tilt the head toward Claude's window while you type into it
 
     @property
     def animation_name(self) -> str:
         # THROWN is a distinct FSM state (ends in DIZZY) but shares the free-fall sprite
         if self is PetState.THROWN:
             return PetState.FALLING.value
-        if self is PetState.CHASE_CURSOR:
+        if self is PetState.CHASE_CURSOR or self is PetState.ENTER_WALK:
             return PetState.WANDER.value
         return self.value

@@ -146,7 +146,7 @@ def test_tray_dispatcher_and_click_through_exstyle(tmp_path: Path) -> None:
     assert ctrl.body.center_x == pytest.approx(win_snap.rect.center_x)
 
     dispatch_tray_action(CMD_SUMMON_CENTER, ctrl, overlay, tray_state, win_snap)
-    assert ctrl.body.center_x == pytest.approx(work_area.center_x)
+    assert ctrl.state in (PetState.FALLING, PetState.ENTER_WALK)  # A random entrance, never onto Claude
 
     # 5. Exit command returns True
     should_exit = dispatch_tray_action(CMD_EXIT, ctrl, overlay, tray_state, win_snap)

@@ -204,5 +204,25 @@
       "description": "Look over at Claude's window (down at it when perched on it)."
     }
   ],
-  "entrances": []
+  "entrances": [
+    {
+      "id": "drop_on_claude",
+      "kind": "drop_on_claude",
+      "weight": 5.0,
+      "when": {"claude_visible": true},
+      "description": "Drop onto Claude's title bar."
+    },
+    {
+      "id": "drop_top",
+      "kind": "drop_top",
+      "weight": 3.0,
+      "description": "Fall from the top of the screen at a random spot."
+    },
+    {
+      "id": "walk_in_side",
+      "kind": "walk_in_side",
+      "weight": 2.0,
+      "description": "Walk in from the left or right screen edge (sides that border another monitor are skipped)."
+    }
+  ]
 }

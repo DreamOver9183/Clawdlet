@@ -330,7 +330,11 @@ class FidgetRow:
 
 @dataclass(frozen=True)
 class EntranceRow:
-    """How Clawd arrives on screen at startup / summon (Phase 6)."""
+    """How Clawd arrives on screen at startup / Summon to Center (eSheep's spawn table).
+
+    ``when`` is matched against a context whose ``claude_visible`` / ``claude_foreground`` describe
+    Claude Desktop at that moment; the other keys see a resting floor context.
+    """
 
     id: str
     kind: str
@@ -338,6 +342,9 @@ class EntranceRow:
     when: Condition = field(default_factory=Condition)
     enabled: bool = True
     description: str = ""
+
+    def weight_for(self, mode: str) -> float:
+        return _weight_for(self.weight, mode)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"id": self.id, "kind": self.kind, "weight": self.weight}
@@ -1022,7 +1029,27 @@ LEGACY_DATA: dict[str, Any] = {
             "description": "Look over at Claude's window (down at it when perched on it).",
         },
     ],
-    "entrances": [],
+    "entrances": [
+        {
+            "id": "drop_on_claude",
+            "kind": "drop_on_claude",
+            "weight": 5.0,
+            "when": {"claude_visible": True},
+            "description": "Drop onto Claude's title bar.",
+        },
+        {
+            "id": "drop_top",
+            "kind": "drop_top",
+            "weight": 3.0,
+            "description": "Fall from the top of the screen at a random spot.",
+        },
+        {
+            "id": "walk_in_side",
+            "kind": "walk_in_side",
+            "weight": 2.0,
+            "description": "Walk in from the left or right screen edge (sides that border another monitor are skipped).",
+        },
+    ],
 }
 
 LEGACY_TABLE = build_behavior_table(LEGACY_DATA, origin="legacy")

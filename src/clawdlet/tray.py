@@ -28,6 +28,8 @@ CMD_TOGGLE_CLICK_THROUGH = 1031
 CMD_TOGGLE_DEBUG = 1032
 CMD_TOGGLE_PEEK = 1041
 CMD_TOGGLE_WINDOW_PUSH = 1042
+CMD_TOGGLE_MAIL = 1043
+CMD_TOGGLE_LISTEN = 1044
 CMD_COPY_HOOK_CONFIG = 1051
 CMD_HOOK_STATUS = 1052  # Disabled informational row
 CMD_TOGGLE_HOOK_INSTALL = 1053
@@ -54,6 +56,8 @@ class TrayMenuState:
     manual_typing: bool = False
     peek_mode: bool = False
     window_push: bool = False
+    mail_enabled: bool = True     # Keep a letter for finished turns while you're away
+    listen_enabled: bool = True   # Tilt the head while you type into Claude Desktop
     hooks_status: str = "Claude Code Hooks：關閉 (Off)"
     hooks_installed: bool = False
     hooks_outdated: bool = False  # Installed by an older Clawdlet: the menu offers "Update Hooks"
@@ -276,6 +280,12 @@ class Win32TrayIcon:
             CMD_TOGGLE_WINDOW_PUSH,
             "允許推視窗（過動模式） (Allow Window Push, Hyper)",
         )
+        for enabled, cmd_id, label in (
+            (self.state.mail_enabled, CMD_TOGGLE_MAIL, "離開時送信 (Mail When Away)"),
+            (self.state.listen_enabled, CMD_TOGGLE_LISTEN, "打字時聆聽 (Listen While Typing)"),
+        ):
+            flags = win32con.MF_STRING | (win32con.MF_CHECKED if enabled else win32con.MF_UNCHECKED)
+            win32gui.AppendMenu(menu, flags, cmd_id, label)
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
         win32gui.AppendMenu(
             menu,

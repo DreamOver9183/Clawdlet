@@ -30,7 +30,13 @@ from clawdlet.hook_install import (
     uninstall_hooks,
 )
 from clawdlet.transcript_watch import TranscriptWatcher
-from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
+from clawdlet.behavior import (
+    ENTRANCE_DROP_ON_CLAUDE,
+    SCREEN_SIDES,
+    ClawdletController,
+    WindowSnapshot,
+    drop_y_above_window,
+)
 from clawdlet.behavior_table import (
     BehaviorTable,
     dump_behavior_table,
@@ -38,7 +44,7 @@ from clawdlet.behavior_table import (
     load_behavior_table,
 )
 from clawdlet.config import ActivityMode, PhysicsConfig, TrackerConfig
-from clawdlet.geometry import PixelMapper
+from clawdlet.geometry import PixelMapper, Rect
 from clawdlet.gestures import Gesture
 from clawdlet.input_state import read_pointer_snapshot
 from clawdlet.overlay import ClawdletOverlay
@@ -61,6 +67,8 @@ from clawdlet.tray import (
     CMD_TOGGLE_CLICK_THROUGH,
     CMD_TOGGLE_DEBUG,
     CMD_TOGGLE_HOOK_INSTALL,
+    CMD_TOGGLE_LISTEN,
+    CMD_TOGGLE_MAIL,
     CMD_TOGGLE_PEEK,
     CMD_TOGGLE_TYPING,
     CMD_TOGGLE_WINDOW_PUSH,
@@ -74,6 +82,8 @@ from clawdlet.window_tracker import (
     ROLE_NETWORK,
     ThinkingSample,
     Win32ClaudeTracker,
+    focus_window,
+    get_physical_screen_rects,
     get_physical_work_area,
     nudge_window,
 )
@@ -105,8 +115,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--spawn",
         choices=("above-claude", "center"),
-        default="above-claude",
-        help="Initial spawn location (default: above-claude if open, else center).",
+        default=None,
+        help="Initial spawn location: above-claude (if open, else center) or center "
+        "(default: a random entrance from the behavior table: drop onto Claude, "
+        "fall from the top, or walk in from a screen side).",
     )
     parser.add_argument(
         "--debug",
@@ -122,6 +134,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allow-window-push",
         action="store_true",
         help="Let Hyper mode occasionally nudge the Claude window a few pixels (off by default).",
+    )
+    parser.add_argument(
+        "--no-mail",
+        action="store_true",
+        help="Celebrate finished Claude Code turns even when you're away, instead of keeping a letter.",
+    )
+    parser.add_argument(
+        "--no-listen",
+        action="store_true",
+        help="Don't tilt the head toward Claude Desktop while you type into it.",
     )
     parser.add_argument(
         "--hook-port",
@@ -208,6 +230,52 @@ def format_thinking_sample(sample: ThinkingSample, min_active: int) -> str:
     parts.append(f"active={sample.active_samples}/{min_active}")
     parts.append(f"thinking={sample.is_thinking}")
     return " ".join(parts)
+
+
+def open_entrance_sides(screen: Rect | None, virtual: Rect | None, margin: float = 2.0) -> tuple[int, ...]:
+    """Screen sides Clawd may walk in from: those of ``screen`` that don't border another monitor.
+
+    ``virtual`` is the virtual screen spanning every monitor (``SM_*VIRTUALSCREEN``); a side where
+    it reaches past ``screen`` has a neighbor, and walking in there would start on that monitor.
+    Without metrics both sides are open.
+    """
+    if screen is None or virtual is None:
+        return SCREEN_SIDES
+    sides: list[int] = []
+    if virtual.left >= screen.left - margin:
+        sides.append(-1)
+    if virtual.right <= screen.right + margin:
+        sides.append(1)
+    return tuple(sides)
+
+
+class ExitSequencer:
+    """Tray Exit lets Clawd wave goodbye first, for at most ``MAX_WAIT_S`` (pure, for tests).
+
+    SIGINT and ``--duration`` bypass it and close at once.
+    """
+
+    MAX_WAIT_S = 2.0
+
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.deadline is not None
+
+    def request(self, now: float, goodbye_s: float) -> bool:
+        """Exit was chosen; ``goodbye_s`` is how long the wave takes (0: none). True = close now."""
+        if self.deadline is not None:
+            return True  # Chosen again while waving: don't make the user wait twice
+        wait = min(max(0.0, goodbye_s), self.MAX_WAIT_S)
+        if wait <= 0.0:
+            return True
+        self.deadline = now + wait
+        return False
+
+    def due(self, now: float) -> bool:
+        return self.deadline is not None and now >= self.deadline
 
 
 def sync_tray_state(tray_state: TrayMenuState, controller: ClawdletController) -> None:
@@ -318,10 +386,12 @@ def dispatch_tray_action(
     hook_setup: HookSetup | None = None,
     behaviors_path: Path | None = None,
     folder_opener: Callable[[Path], None] | None = None,
+    entrance_sides: tuple[int, ...] = SCREEN_SIDES,
 ) -> bool:
     """Apply a single tray menu command. Return True if application should exit."""
     if cmd_id == CMD_SUMMON_CENTER:
-        controller.summon_to_center()
+        # A fresh entrance (fall from the top / walk in), never straight onto Claude's window
+        controller.enter_random(latest_win, entrance_sides, exclude=(ENTRANCE_DROP_ON_CLAUDE,))
         tray_state.manual_typing = False
     elif cmd_id == CMD_SUMMON_CLAUDE:
         controller.summon_to_claude(latest_win)
@@ -331,6 +401,12 @@ def dispatch_tray_action(
     elif cmd_id == CMD_TOGGLE_WINDOW_PUSH:
         controller.push_window_enabled = not controller.push_window_enabled
         tray_state.window_push = controller.push_window_enabled
+    elif cmd_id == CMD_TOGGLE_MAIL:
+        controller.set_mail_enabled(not controller.mail_enabled)
+        tray_state.mail_enabled = controller.mail_enabled
+    elif cmd_id == CMD_TOGGLE_LISTEN:
+        controller.set_listen_enabled(not controller.listen_enabled)
+        tray_state.listen_enabled = controller.listen_enabled
     elif cmd_id == CMD_TOGGLE_PEEK:
         controller.set_peek_mode(not controller.peek_mode)
         tray_state.peek_mode = controller.peek_mode
@@ -404,6 +480,11 @@ def main(argv: list[str] | None = None) -> int:
     pet_h = float(sprite_bank.scaled_height)
 
     initial_win = tracker.poll()
+    screens = get_physical_screen_rects()
+    if screens is None:
+        entrance_sides = SCREEN_SIDES
+    else:
+        entrance_sides = open_entrance_sides(*(mapper.to_logical_rect(r) for r in screens))
     if (
         args.spawn == "above-claude"
         and initial_win is not None
@@ -430,6 +511,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     controller.window_nudger = nudge_window
     controller.push_window_enabled = args.allow_window_push
+    controller.window_focuser = focus_window
+    controller.set_mail_enabled(not args.no_mail)
+    controller.set_listen_enabled(not args.no_listen)
+    if args.spawn is None:
+        # No explicit --spawn: arrive the way the behavior table's entrances pick
+        kind = controller.enter_random(initial_win, entrance_sides)
+        if args.debug:
+            print(f"[Clawdlet] entrance={kind} sides={entrance_sides}")
     overlay = ClawdletOverlay(
         root=root,
         controller=controller,
@@ -447,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
         click_through=args.click_through,
         debug=args.debug,
         window_push=args.allow_window_push,
+        mail_enabled=not args.no_mail,
+        listen_enabled=not args.no_listen,
     )
     hook_queue: queue.Queue[tuple[AgentEvent, str, str]] = queue.Queue()
     hook_server: HookServer | None = None
@@ -491,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     running = True
+    exit_sequencer = ExitSequencer()
 
     def _stop(*_: object) -> None:
         nonlocal running
@@ -529,6 +621,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.duration > 0.0 and (now - start_time) >= args.duration:
             _stop()
             return
+        if exit_sequencer.due(now):
+            _stop()  # The goodbye wave is over
+            return
 
         frame_dt = min(0.10, max(0.0, now - last_time))
         last_time = now
@@ -557,10 +652,13 @@ def main(argv: list[str] | None = None) -> int:
                 hook_config=hook_config,
                 hook_setup=hook_setup,
                 behaviors_path=args.behaviors,
+                entrance_sides=entrance_sides,
             )
             if should_exit:
-                _stop()
-                return
+                goodbye_s = 0.0 if exit_sequencer.pending else controller.begin_goodbye()
+                if exit_sequencer.request(now, goodbye_s):
+                    _stop()
+                    return
 
         for gesture in overlay.poll_gestures(now):
             dispatch_gesture(gesture, controller)
