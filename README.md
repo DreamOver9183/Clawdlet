@@ -24,6 +24,8 @@ let clawd = new WindowCompanion({ gravity: true });
 
 ### 2. Comedic Side-Profile Laptop Typing | 喜感側面掏筆電重摔打字 (`\_`)
 - When Claude Desktop is actively thinking/generating—or when you **double-click** Clawdlet—it pulls a sleek `8×2` Ultrabook out of its belly, jumps high overhead, **slams the laptop down** into a side-profile `\_` shape with shockwave sparks, and stretches out **two long arms** to hammer away at the keyboard!
+- **Work sessions (`工作節奏`)**: typing comes in segments (Quiet 20–40 s, Normal 14–28 s, Hyper 8–16 s) with short 2.5–4.5 s breaks where Clawd glances up from the laptop. When Claude Desktop's I/O heuristic is the only signal, typing stops after 60 s and the heuristic is ignored for the next 90 s (Claude Code hooks / transcripts still work), and for 8 s after a finished turn so the Desktop's trailing I/O doesn't restart it.
+  打字改成一段一段：每段 安靜 20–40 秒／標準 14–28 秒／過動 8–16 秒，中間會抬頭看一眼休息 2.5–4.5 秒。只有 Claude Desktop 的 I/O 推測訊號時，最多連續打字 60 秒，之後 90 秒不理會這個訊號（Claude Code 的 hook／transcript 不受影響）；回合結束後 8 秒內也會忽略 Desktop 的 I/O 尾巴。
 
 ### 3. Mode-Dependent Laptop Put-Away & Cross-Screen Kick | 依模式分流的收筆電／踢飛大爆炸
 - **Standard / Quiet Mode (`標準／安靜模式`)**: Neatly closes the `\_` laptop lid, picks up the folded Ultrabook, tucks it back into its belly, and pats its stomach (`put_away_laptop`).
@@ -119,7 +121,7 @@ python -m clawdlet.tools.build_exe
 | Input | Action | 操作說明 |
 | :--- | :--- | :--- |
 | **Left-Click + Drag** | Pick up & throw | 左鍵按住並移動超過 4px 即拎起掙扎，甩動放開可依滑鼠軌跡拋飛（高速落地會眼冒金星暈眩） |
-| **Single Left-Click** | Poke | 單擊戳一下（睡著時會嚇醒；頭上有「!」時代表已讀） |
+| **Single Left-Click** | Poke | 單擊戳一下（睡著時會嚇醒；頭上有「!」時代表已讀；打字時只會抬頭看你一眼，然後繼續打字） |
 | **Double Left-Click** | Toggle Laptop Typing | 左鍵雙擊切換「掏筆電重摔打字」，再次雙擊（或 6 秒後）觸發收筆電／踢飛筆電。單擊／雙擊要等系統雙擊間隔（最多 0.5 秒）結束才判定 |
 | **3+ Rapid Clicks** | Tantrum | 連點三下以上會抓狂跺腳 |
 | **Rub Mouse Over Pet** | Pet | 不按鍵、滑鼠在身上左右來回摩擦就是撫摸，會冒愛心 |

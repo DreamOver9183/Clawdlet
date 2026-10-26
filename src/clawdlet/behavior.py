@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 import random
 
-from clawdlet.agent_events import HOOK_SOURCE, AgentActivity, AgentEvent
+from clawdlet.agent_events import HOOK_SOURCE, SESSION_BUSY, AgentActivity, AgentEvent
 from clawdlet.config import (
     ACTIVITY_PROFILES,
     ActivityMode,
@@ -27,6 +27,10 @@ from clawdlet.window_push import (
     PushPlan,
     plan_window_push,
 )
+from clawdlet.work_session import PHASE_TYPING, WorkConfig, WorkDirective, WorkSession, WorkSignal
+
+# Offset of the work-session random stream from ``rng_seed`` (keeps it apart from ``_rng``)
+_WORK_RNG_OFFSET = 7919
 
 
 class PetState(str, Enum):
@@ -59,6 +63,8 @@ class PetState(str, Enum):
     ERROR_SWEAT = "error_sweat"
     ALERT = "alert"
     PUSH_WINDOW = "push_window"
+    # Milestone 6 work sessions
+    WORK_GLANCE = "work_glance"
 
     @property
     def animation_name(self) -> str:
@@ -88,22 +94,24 @@ _STATIONARY_STATES = frozenset({
     PetState.ALERT,
 })
 
-# States that Claude thinking / agent busy (and manual typing) may interrupt to pull out the laptop.
-# User reactions, ALERT, CELEBRATE, ERROR_SWEAT and PEEK_EDGE play out instead.
-_BUSY_INTERRUPTIBLE = frozenset({
+# States a work session (Claude thinking / agent busy / manual typing) may interrupt to pull out the
+# laptop. User reactions, ALERT, CELEBRATE, ERROR_SWEAT and PEEK_EDGE play out instead; a laptop
+# being put away finishes first and then comes straight back out.
+_WORK_ENTRY_STATES = frozenset({
     PetState.IDLE,
     PetState.BLOB,
     PetState.WANDER,
     PetState.PERCH_CLAUDE,
     PetState.CHASE_CURSOR,
-    PetState.TYPING,
-    PetState.PUT_AWAY_LAPTOP,
-    PetState.KICK_LAPTOP,
     PetState.YAWN,
     PetState.SLEEP,
     PetState.WAKE_STARTLE,
     PetState.PUSH_WINDOW,
 })
+
+# Short breaks between typing segments (laptop stays out). Add new break states here.
+_WORK_BREAK_STATES = frozenset({PetState.WORK_GLANCE})
+_WORK_STATES = frozenset({PetState.TYPING, *_WORK_BREAK_STATES})
 
 # States in which clicks, petting, and agent events are ignored (held, airborne, or mid-climb)
 _UNREACTIVE_STATES = frozenset({
@@ -116,7 +124,11 @@ _UNREACTIVE_STATES = frozenset({
     PetState.POUNCE,
 })
 
-_LAPTOP_STATES = frozenset({PetState.TYPING, PetState.PUT_AWAY_LAPTOP, PetState.KICK_LAPTOP})
+# Laptop out (never flipped; tantrums and petting are ignored)
+_LAPTOP_STATES = frozenset({*_WORK_STATES, PetState.PUT_AWAY_LAPTOP, PetState.KICK_LAPTOP})
+
+# States from which a finished turn celebrates right away
+_BUSY_INTERRUPTIBLE = _WORK_ENTRY_STATES | _LAPTOP_STATES
 
 # States ticked by the "perched on Claude Desktop's top border" path while a window is locked
 _PERCH_TICK_STATES = frozenset({
@@ -215,6 +227,7 @@ class ClawdletController:
     WAKE_DURATION_S: float = 0.60        # wake_startle: 4 frames @ 6.6 FPS
     CELEBRATE_DURATION_S: float = 1.60   # celebrate: 8 frames @ 5 FPS
     ERROR_SWEAT_DURATION_S: float = 1.40 # error_sweat: 6 frames @ 4.3 FPS
+    WORK_GLANCE_POKE_S: float = 0.75     # Poked while typing: look up briefly, then keep typing
     GAZE_BLINK_S: float = 0.12
     CHASE_SPEED_MULT: float = 1.40       # Chasing the cursor is an excited trot
 
@@ -286,6 +299,13 @@ class ClawdletController:
 
         # Claude Code hook activity (Milestone 5)
         self.agent = AgentActivity(self.interaction_cfg.agent_busy_expiry_s)
+        # Work sessions (typing segments, breaks, heuristic cap) draw from their own stream
+        self._work_rng = random.Random(None if rng_seed is None else rng_seed + _WORK_RNG_OFFSET)
+        self._work = WorkSession(WorkConfig(), self._work_rng)
+        self._work_directive: WorkDirective = WorkDirective.NONE
+        self._work_sig: WorkSignal = WorkSignal(heuristic=False, agent_busy=False)
+        self._typing_resumed: bool = False   # TYPING renders typing_loop (no laptop intro)
+        self._glance_return_s: float = 0.0   # Manual typing time left when a poke glance started
         self._alert_session: str | None = None
         self._pending_celebrate: bool = False
         self._last_win: WindowSnapshot | None = None
@@ -443,13 +463,21 @@ class ClawdletController:
             pass  # Let the put-away / kick finish; the rest transition pulls the laptop back out
         elif self.manual_typing and self.body.grounded:
             self._enter_manual_typing()
-        elif not self.manual_typing and self.state == PetState.TYPING:
+        elif not self.manual_typing and self.state in _WORK_STATES:
             self._start_stop_typing()
         return self.manual_typing
 
     def poke(self) -> bool:
-        """Single click: flinch (or wake up / acknowledge an alert). Return True if it reacted."""
-        if not self._can_react() or self.state in _LAPTOP_STATES:
+        """Single click: flinch (or wake up / acknowledge an alert). Return True if it reacted.
+
+        While typing, Clawd only glances up from the laptop and then keeps working.
+        """
+        if not self._can_react():
+            return False
+        if self.state in _WORK_STATES:
+            self._start_poke_glance()
+            return True
+        if self.state in _LAPTOP_STATES:
             return False
         if self.state in (PetState.PETTED, PetState.FLAIL):
             return False  # Stronger reactions keep playing
@@ -481,7 +509,7 @@ class ClawdletController:
         return True
 
     def handle_agent_event(self, event: AgentEvent, session_id: str, source: str = HOOK_SOURCE) -> None:
-        """React to a Claude Code activity event (busy typing is picked up through ``_is_thinking``).
+        """React to a Claude Code activity event (busy typing is picked up through the work session).
 
         Hooks are authoritative: once a session has sent a hook event, transcript-derived events
         for it are dropped so the two sources can never double-celebrate or flip-flop. The one
@@ -495,6 +523,8 @@ class ClawdletController:
             return  # Not acted on yet
         win = self._last_win
         was_busy = self.agent.note(event, session_id, self._clock, source)
+        if event == AgentEvent.DONE:
+            self._work.note_done(self._clock)  # Ignore the Claude Desktop I/O tail of the finished turn
 
         # Any follow-up from the session that raised the alert means it is no longer waiting
         if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING) and session_id == self._alert_session:
@@ -510,7 +540,7 @@ class ClawdletController:
             if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL):
                 self._set_state(PetState.ERROR_SWEAT, self.ERROR_SWEAT_DURATION_S)
         elif event == AgentEvent.DONE and was_busy:
-            if self.state == PetState.TYPING and not self._is_thinking(win):
+            if self.state in _WORK_STATES and not self._still_working(win):
                 # Laptop away first (tuck or kick by mode), then the victory dance
                 self._start_stop_typing()
                 self._pending_celebrate = True
@@ -521,7 +551,7 @@ class ClawdletController:
         elif event == AgentEvent.INTERRUPTED and was_busy:
             # Like DONE, minus the victory dance (WAITING needs nothing: the session just stops
             # counting as busy, so typing winds down on its own)
-            if self.state == PetState.TYPING and not self._is_thinking(win):
+            if self.state in _WORK_STATES and not self._still_working(win):
                 self._start_stop_typing()
 
     def begin_drag(self, cursor_x: float, cursor_y: float) -> None:
@@ -672,6 +702,112 @@ class ClawdletController:
         self.state = PetState.TYPING
         self._state_timer = 0.0
         self._decision_duration = 6.0
+        self._typing_resumed = False
+
+    # --- Milestone 6: work sessions (typing segments and breaks) --------------------------------
+
+    def work_description(self) -> str:
+        """Work-session summary for --debug, e.g. ``work=typing seg=12.3/21.0s src=agent cooldown=0s``."""
+        return self._work.describe(self._clock)
+
+    def _work_signal(self, win: WindowSnapshot | None, manual: bool | None = None) -> WorkSignal:
+        """Claude Desktop heuristic thinking (tracker), busy Claude Code sessions (hooks) and manual typing."""
+        busy = self.agent.busy(self._clock)
+        subagents = sum(st.subagents for st in self.agent.sessions.values() if st.phase == SESSION_BUSY)
+        return WorkSignal(
+            heuristic=bool(win is not None and win.is_thinking),
+            agent_busy=busy,
+            subagents=subagents,
+            manual=self.manual_typing if manual is None else manual,
+        )
+
+    def _still_working(self, win: WindowSnapshot | None) -> bool:
+        """Is Claude still working (ignoring manual typing) after an agent event?"""
+        return self._work.effective(self._work_signal(win, manual=False), self._clock)
+
+    def _work_wanted(self) -> bool:
+        """The work session is running and its signal is up this tick: the laptop should be out."""
+        return self._work.active and self._work.effective(self._work_sig, self._clock)
+
+    def _enter_work_typing(self, new_segment: bool = True) -> None:
+        """Pull out the laptop (full intro) for a work-session typing segment."""
+        if new_segment:
+            self._work.begin_segment(self.activity_mode)
+        self.body.vx = 0.0
+        self._set_state(PetState.TYPING, self._work.phase_len)
+        self._typing_resumed = False
+
+    def _resume_typing(self) -> None:
+        """Back from a break / glance: keep typing without replaying the laptop intro."""
+        duration = self._glance_return_s if self.manual_typing else self._work.phase_len
+        self.body.vx = 0.0
+        self._set_state(PetState.TYPING, duration)
+        self._typing_resumed = True
+
+    def _pick_work_break(self) -> PetState:
+        return PetState.WORK_GLANCE
+
+    def _start_work_break(self) -> None:
+        self.body.vx = 0.0
+        self._set_state(self._pick_work_break(), self._work.phase_len)
+
+    def _start_poke_glance(self) -> None:
+        if self.state == PetState.TYPING:
+            self._glance_return_s = max(0.0, self._decision_duration - self._state_timer)
+        self.body.vx = 0.0
+        self._set_state(PetState.WORK_GLANCE, self.WORK_GLANCE_POKE_S)
+
+    def _step_work(self, win: WindowSnapshot | None) -> bool:
+        """Apply this tick's work-session directive to the FSM. Return True when the state changed.
+
+        Typing only starts from a work-entry state, so reactions, alerts and landings play out
+        first. Never touches the state timer of an ongoing segment.
+        """
+        directive = self._work_directive
+        self._work_directive = WorkDirective.NONE
+        state = self.state
+        if state in _WORK_STATES:
+            if not self._work.active and not self.manual_typing:
+                # END / CAP (or the session wound down while Clawd was busy with something else)
+                self._start_stop_typing()
+                return True
+            if directive == WorkDirective.BREAK and state == PetState.TYPING:
+                self._start_work_break()
+                return True
+            if directive == WorkDirective.RESUME and state in _WORK_BREAK_STATES:
+                self._resume_typing()
+                return True
+            return False
+        if state in _WORK_ENTRY_STATES and self._work_wanted():
+            if self.manual_typing:
+                self._enter_manual_typing()
+            else:
+                # START already drew this segment; re-entering after a reaction starts a fresh one
+                self._enter_work_typing(new_segment=directive != WorkDirective.START)
+            return True
+        return False
+
+    def _advance_typing(self, win: WindowSnapshot | None) -> None:
+        """Manual typing stops after its timer; work typing is ended by the work session."""
+        if not self.manual_typing or self._state_timer < self._decision_duration:
+            return
+        if self._still_working(win):
+            # Claude is working anyway: hand the laptop over to the work session
+            self.manual_typing = False
+            self._work.begin_segment(self.activity_mode)
+            self._decision_duration = self._work.phase_len
+        else:
+            self._start_stop_typing()
+
+    def _advance_work_break(self, win: WindowSnapshot | None) -> None:
+        """End a break / poke glance once its timer runs out."""
+        if self._state_timer < self._decision_duration:
+            return
+        if self.manual_typing or self._work.phase == PHASE_TYPING:
+            self._resume_typing()
+        elif not self._work.active:
+            self._start_stop_typing()
+        # Otherwise the session is still on its break: keep glancing until RESUME / END
 
     # --- Milestone 5: shared reaction plumbing --------------------------------------------------
 
@@ -679,10 +815,6 @@ class ClawdletController:
     def clock(self) -> float:
         """Simulation time in seconds (the clock agent events are stamped with)."""
         return self._clock
-
-    def _is_thinking(self, win: WindowSnapshot | None) -> bool:
-        """Claude Desktop heuristic thinking (tracker) or a busy Claude Code session (hooks)."""
-        return bool(win is not None and win.is_thinking) or self.agent.busy(self._clock)
 
     def _set_state(self, state: PetState, duration: float | None = None) -> None:
         self.state = state
@@ -728,7 +860,8 @@ class ClawdletController:
         return (
             p is not None
             and p.idle_s >= self.interaction_cfg.sleep_after_idle_s
-            and not self._is_thinking(win)
+            # A capped / muted heuristic no longer keeps Clawd awake
+            and not self._work.effective(self._work_signal(win), self._clock)
         )
 
     def _head_to_peek_edge(self) -> None:
@@ -1000,6 +1133,10 @@ class ClawdletController:
             self._pending_celebrate = False
             self._set_state(PetState.CELEBRATE)
             return
+        if self._work_wanted():
+            # Claude got busy again while the laptop was being put away: straight back to work
+            self._enter_work_typing()
+            return
         if self.peek_mode:
             self._head_to_peek_edge()
             return
@@ -1055,6 +1192,9 @@ class ClawdletController:
         if self._pending_celebrate:
             self._pending_celebrate = False
             self._set_state(PetState.CELEBRATE)
+            return
+        if self._work_wanted():
+            self._enter_work_typing()
             return
         if self.peek_mode:
             self._hop_off_perch(win)
@@ -1170,16 +1310,9 @@ class ClawdletController:
             self._detach_by_shake(win_vel)
             return None
 
-        thinking = self._is_thinking(win)
-        if thinking and self.state in _BUSY_INTERRUPTIBLE:
-            self.state = PetState.TYPING
-            self._state_timer = 0.0
-            self._decision_duration = 0.8
-        elif (
-            self.manual_typing
-            and self.state in _BUSY_INTERRUPTIBLE
-            and self.state not in _LAPTOP_STATES
-        ):
+        if self._step_work(win):
+            pass
+        elif self.manual_typing and self.state in _WORK_ENTRY_STATES:
             self._enter_manual_typing()
         elif self.state == PetState.CHASE_CURSOR:
             self._step_perch_chase(dt, win)
@@ -1206,11 +1339,12 @@ class ClawdletController:
             self._advance_reaction(win)
         elif self.state in _REST_STATES and self._maybe_start_idle_behavior(win):
             pass
-        elif not thinking and self._state_timer >= self._decision_duration:
-            if self.state == PetState.TYPING:
-                self._start_stop_typing()
-            else:
-                self._transition_from_perch(win)
+        elif self.state == PetState.TYPING:
+            self._advance_typing(win)
+        elif self.state in _WORK_BREAK_STATES:
+            self._advance_work_break(win)
+        elif self._state_timer >= self._decision_duration:
+            self._transition_from_perch(win)
         if self._perched_hwnd is None:
             return None  # Launched off the border (pounce / hop): physics takes over this tick
 
@@ -1279,6 +1413,9 @@ class ClawdletController:
         self._update_pointer(dt, pointer)
         self._last_win = win
         self._tick_projectile(dt)
+        # Work session first: the perch / floor paths below apply its directive via _step_work
+        self._work_sig = self._work_signal(win)
+        self._work_directive = self._work.update(dt, self._work_sig, self._clock, self.activity_mode)
 
         win_vel = self._update_window_velocity(dt, win)
         perchable_rect = win.rect if (win is not None and win.is_perchable) else None
@@ -1303,23 +1440,17 @@ class ClawdletController:
             if recovering_render is not None:
                 return recovering_render
 
-        # 3b. If grounded on floor and Claude is actively thinking (or manual typing just toggled), type!
-        # Landing squish and dizzy always play out first.
+        # 3b. Grounded on the floor: follow the work session (start / break / resume / end typing),
+        # or manual typing that was just toggled. Landing squish and dizzy always play out first.
         on_floor = self.body.grounded and self._perched_hwnd is None
-        if on_floor and self.state in _BUSY_INTERRUPTIBLE:
-            if self._is_thinking(win):
-                self.body.vx = 0.0
+        if on_floor:
+            if self._step_work(win):
+                if self.state == PetState.TYPING:
+                    self.body.vy = 0.0
+                    return self._build_render_state(win, win_vel)
+            elif self.manual_typing and self.state in _WORK_ENTRY_STATES:
                 self.body.vy = 0.0
-                self.state = PetState.TYPING
-                self._state_timer = 0.0
-                self._decision_duration = 0.8
-                return self._build_render_state(win, win_vel)
-            if self.manual_typing and self.state not in _LAPTOP_STATES:
-                self.body.vx = 0.0
-                self.body.vy = 0.0
-                self.state = PetState.TYPING
-                self._state_timer = 0.0
-                self._decision_duration = 6.0
+                self._enter_manual_typing()
                 return self._build_render_state(win, win_vel)
 
         # 3c. Resting on the floor: maybe pounce at a resting cursor
@@ -1448,8 +1579,9 @@ class ClawdletController:
                     self._state_timer = 0.0
                     self._decision_duration = self._rng.uniform(2.0, 4.0) * rest_mult
             elif self.state == PetState.TYPING:
-                if self._state_timer >= self._decision_duration:
-                    self._start_stop_typing()
+                self._advance_typing(win)
+            elif self.state in _WORK_BREAK_STATES:
+                self._advance_work_break(win)
             elif self.state in (
                 PetState.IDLE,
                 PetState.BLOB,
@@ -1504,11 +1636,7 @@ class ClawdletController:
 
         if self.state == PetState.CLIMB:
             flip_x = self._climb_wall_side > 0
-        elif self.state in (
-            PetState.TYPING,
-            PetState.PUT_AWAY_LAPTOP,
-            PetState.KICK_LAPTOP,
-        ):
+        elif self.state in _LAPTOP_STATES:
             flip_x = False
         else:
             flip_x = self.facing < 0
@@ -1527,6 +1655,8 @@ class ClawdletController:
             )
 
         animation_name = self.state.animation_name
+        if self.state == PetState.TYPING and self._typing_resumed:
+            animation_name = "typing_loop"  # Laptop already out: skip the intro frames
         if self.state == PetState.PEEK_EDGE and self._cursor_near(120.0):
             animation_name = "peek_out"
         frame_index = self._gaze_frame(win)

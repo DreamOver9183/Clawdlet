@@ -90,14 +90,24 @@ def test_priorities_between_reactions() -> None:
     assert ctrl.poke() is False
 
 
-def test_typing_ignores_single_clicks_and_tantrums() -> None:
+def test_typing_glances_up_on_poke_but_ignores_tantrums_and_petting() -> None:
     ctrl = _floor()
     ctrl.toggle_typing()
     assert ctrl.state == PetState.TYPING
-    assert ctrl.poke() is False
     assert ctrl.flail() is False
     assert ctrl.pet() is False
     assert ctrl.state == PetState.TYPING
+    assert ctrl.poke() is True  # A single click only makes Clawd look up from the laptop
+    assert ctrl.state == PetState.WORK_GLANCE
+    assert ctrl.flail() is False
+    assert ctrl.pet() is False
+    frames = [ctrl.tick(DT, None) for _ in range(int((ClawdletController.WORK_GLANCE_POKE_S + 0.2) / DT))]
+    glance = [f for f in frames if f.state == PetState.WORK_GLANCE]
+    assert len(glance) == pytest.approx(ClawdletController.WORK_GLANCE_POKE_S / DT, abs=2)
+    assert glance[0].animation_name == "work_glance"
+    assert frames[-1].state == PetState.TYPING
+    assert frames[-1].animation_name == "typing_loop"  # Laptop already out: no intro replay
+    assert ctrl.manual_typing is True
 
 
 def test_airborne_or_held_pet_ignores_reactions() -> None:

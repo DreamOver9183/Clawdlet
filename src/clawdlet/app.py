@@ -514,7 +514,10 @@ def main(argv: list[str] | None = None) -> int:
             last_sample_log_time = now
             if sample is not None:
                 print(f"[Clawdlet] {format_thinking_sample(sample, tracker.cfg.thinking_min_active)}")
-            print(f"[Clawdlet] agent {controller.agent.describe(controller.clock)}")
+            print(
+                f"[Clawdlet] agent {controller.agent.describe(controller.clock)} "
+                f"| {controller.work_description()}"
+            )
 
         root.after(12, _on_tick)
 
