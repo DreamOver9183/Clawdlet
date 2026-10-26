@@ -108,28 +108,55 @@ def _write_atomic(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
-def hooks_installed(path: Path, port: int) -> bool:
-    """True when every default event has a Clawdlet handler pointing at ``port``."""
+HOOKS_NONE = "none"
+HOOKS_OUTDATED = "outdated"
+HOOKS_CURRENT = "current"
+
+
+def _own_handlers(groups: Any) -> list[dict[str, Any]]:
+    if not isinstance(groups, list):
+        return []
+    return [
+        h
+        for g in groups
+        if isinstance(g, dict) and isinstance(g.get("hooks"), list)
+        for h in g["hooks"]
+        if _is_own_handler(h)
+    ]
+
+
+def hook_install_state(path: Path, port: int, token: str | None = None) -> str:
+    """``"current"``: every default event has a Clawdlet handler for ``port`` (and ``token`` if given).
+
+    ``"outdated"``: Clawdlet handlers exist but not that full set (an older Clawdlet without the
+    newer events, another port, or a rotated token); installing again upgrades them in place.
+    ``"none"``: no Clawdlet handler at all (or the file is missing / unreadable).
+    """
     data, error = _load(path)
     if error or not data:
-        return False
+        return HOOKS_NONE
     hooks = data.get("hooks", {})
+    if not any(_own_handlers(groups) for groups in hooks.values()):
+        return HOOKS_NONE
     url = f"http://127.0.0.1:{port}/hook"
+    auth = None if token is None else f"Bearer {token}"
     for event in DEFAULT_HOOK_EVENTS:
-        groups = hooks.get(event)
-        if not isinstance(groups, list):
-            return False
         if not any(
-            _is_own_handler(h) and h.get("url") == url
-            for g in groups
-            if isinstance(g, dict) and isinstance(g.get("hooks"), list)
-            for h in g["hooks"]
+            h.get("url") == url
+            and (auth is None or (isinstance(h.get("headers"), dict) and h["headers"].get("Authorization") == auth))
+            for h in _own_handlers(hooks.get(event))
         ):
-            return False
-    return True
+            return HOOKS_OUTDATED
+    return HOOKS_CURRENT
+
+
+def hooks_installed(path: Path, port: int) -> bool:
+    """True when every default event has a Clawdlet handler pointing at ``port``."""
+    return hook_install_state(path, port) == HOOKS_CURRENT
 
 
 def install_hooks(path: Path, port: int, token: str) -> InstallResult:
+    """Add (or upgrade) Clawdlet's hooks. Idempotent: our old entries are removed before adding."""
     data, error = _load(path)
     if data is None:
         return InstallResult(False, error or "unreadable settings")

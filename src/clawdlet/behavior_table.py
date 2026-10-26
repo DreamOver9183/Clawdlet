@@ -56,7 +56,7 @@ SECTIONS = ("behaviors", "work_breaks", "fidgets", "entrances")
 
 # States the table may start. Later phases extend these as their states land in PetState.
 SELECTABLE_STATES = frozenset({"IDLE", "BLOB", "PERCH_CLAUDE"})
-WORK_BREAK_STATES = frozenset({"WORK_GLANCE"})
+WORK_BREAK_STATES = frozenset({"WORK_GLANCE", "WORK_STRETCH", "WORK_THINK", "WORK_SIP"})
 
 # Surfaces each selectable state can be shown on (intersected with ``when.surface``)
 _STATE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -64,6 +64,9 @@ _STATE_SURFACES: dict[str, tuple[str, ...]] = {
     "BLOB": ("floor", "perch"),
     "PERCH_CLAUDE": ("perch",),
     "WORK_GLANCE": ("floor", "perch"),
+    "WORK_STRETCH": ("floor", "perch"),
+    "WORK_THINK": ("floor", "perch"),
+    "WORK_SIP": ("floor", "perch"),
 }
 
 _ID_RE = re.compile(r"^[a-z0-9_]+$")
@@ -107,7 +110,9 @@ _SETTINGS_KEYS = frozenset({
     "alert_escalate_s",
     "work",
 })
-_WORK_KEYS = frozenset({"segment_s", "break_s", "heuristic_max_s", "heuristic_cooldown_s"})
+_WORK_KEYS = frozenset(
+    {"segment_s", "break_s", "heuristic_max_s", "heuristic_cooldown_s", "juggle_segment_s"}
+)
 
 
 class _RowError(ValueError):
@@ -321,6 +326,7 @@ class WorkSettings:
     break_s: tuple[float, float] = WorkConfig().break_s
     heuristic_max_s: float = WorkConfig().heuristic_max_s
     heuristic_cooldown_s: float = WorkConfig().heuristic_cooldown_s
+    juggle_segment_s: tuple[float, float] = WorkConfig().juggle_segment_s
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -328,6 +334,7 @@ class WorkSettings:
             "break_s": list(self.break_s),
             "heuristic_max_s": self.heuristic_max_s,
             "heuristic_cooldown_s": self.heuristic_cooldown_s,
+            "juggle_segment_s": list(self.juggle_segment_s),
         }
 
 
@@ -349,6 +356,8 @@ class BehaviorSettings:
             heuristic_cooldown_s=self.work.heuristic_cooldown_s,
             quiet_debounce_s=base.quiet_debounce_s,
             done_suppress_s=base.done_suppress_s,
+            juggle_segment_s=self.work.juggle_segment_s,
+            juggle_lead_s=base.juggle_lead_s,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -712,6 +721,7 @@ def _parse_work_settings(raw: dict[str, Any], warnings: list[str]) -> WorkSettin
         ("break_s", lambda v: _span(v, "value", 0.2)),
         ("heuristic_max_s", lambda v: _number(v, "value", 1.0)),
         ("heuristic_cooldown_s", lambda v: _number(v, "value")),
+        ("juggle_segment_s", lambda v: _span(v, "value", 0.5)),
     ):
         if key in raw:
             try:
@@ -813,9 +823,33 @@ LEGACY_DATA: dict[str, Any] = {
     ],
     "work_breaks": [
         {
+            "id": "stretch",
+            "state": "WORK_STRETCH",
+            "weight": 3.0,
+            "duration_s": [2.5, 3.5],
+            "cooldown_s": 60.0,
+            "description": "Stretch both claws overhead beside the laptop (the strip holds its last, resting frame).",
+        },
+        {
+            "id": "think",
+            "state": "WORK_THINK",
+            "weight": 4.0,
+            "duration_s": [3.0, 5.0],
+            "description": "Rest the chin on a claw and ponder, '...' over the head.",
+        },
+        {
+            "id": "sip",
+            "state": "WORK_SIP",
+            "weight": 3.0,
+            "duration_s": [2.5, 4.0],
+            "cooldown_s": 90.0,
+            "description": "Sip from the steaming mug next to the laptop.",
+        },
+        {
             "id": "glance",
             "state": "WORK_GLANCE",
-            "weight": 1.0,
+            "weight": 2.0,
+            "duration_s": [1.5, 2.5],
             "description": "Look up from the laptop for a moment.",
         },
     ],
@@ -975,6 +1009,9 @@ def ensure_user_config(config_dir: Path) -> Path:
 
 # --- Selection ----------------------------------------------------------------------------------
 
+WORK_BREAK_TRIGGER = "work_break"
+_WORK_BREAK_KEY = "work_breaks/"  # Cooldown keys: a break id may repeat a behavior id
+
 
 class BehaviorSelector:
     """Pick behavior rows: opportunistic ``chance`` rows first, then a weighted pick.
@@ -994,12 +1031,14 @@ class BehaviorSelector:
         self._by_id = {row.id: row for row in table.behaviors}
         self._chain_depth = 0
 
-    def _eligible(self, row: BehaviorRow, trigger: str | None, ctx: IdleContext) -> bool:
+    def _eligible(
+        self, row: BehaviorRow, trigger: str | None, ctx: IdleContext, key: str | None = None
+    ) -> bool:
         if not row.enabled or (trigger is not None and row.on != trigger):
             return False
         if ctx.surface not in row.surfaces or not row.when.matches(ctx):
             return False
-        last = self._last_start.get(row.id)
+        last = self._last_start.get(row.id if key is None else key)
         return row.cooldown_s <= 0.0 or last is None or ctx.now - last >= row.cooldown_s
 
     def _weighted(self, pool: list[tuple[BehaviorRow, float]], u: float | None) -> BehaviorRow | None:
@@ -1070,14 +1109,18 @@ class BehaviorSelector:
         return self._started(picked, ctx)
 
     def pick_work_break(self, ctx: IdleContext) -> BehaviorRow | None:
+        """Weighted pick from ``work_breaks`` (the ``work_break`` trigger: the section itself).
+
+        Always draws from ``rng``; rows on cooldown sit out. None when nothing is eligible.
+        """
         pool = [
             (row, row.weight_for(ctx.mode))
             for row in self.table.work_breaks
-            if self._eligible(row, None, ctx)
+            if self._eligible(row, None, ctx, key=_WORK_BREAK_KEY + row.id)
         ]
         picked = self._weighted(pool, None)
-        return None if picked is None else self._started(picked, ctx)
+        return None if picked is None else self._started(picked, ctx, key=_WORK_BREAK_KEY + picked.id)
 
-    def _started(self, row: BehaviorRow, ctx: IdleContext) -> BehaviorRow:
-        self._last_start[row.id] = ctx.now
+    def _started(self, row: BehaviorRow, ctx: IdleContext, key: str | None = None) -> BehaviorRow:
+        self._last_start[row.id if key is None else key] = ctx.now
         return row

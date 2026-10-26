@@ -7,8 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import random
 
-from clawdlet.agent_events import HOOK_SOURCE, SESSION_BUSY, AgentActivity, AgentEvent
+from clawdlet.agent_events import HOOK_SOURCE, AgentActivity, AgentEvent
 from clawdlet.behavior_table import (
+    WORK_BREAK_TRIGGER,
     BehaviorRow,
     BehaviorSelector,
     BehaviorTable,
@@ -34,7 +35,7 @@ from clawdlet.window_push import (
     PushPlan,
     plan_window_push,
 )
-from clawdlet.work_session import PHASE_TYPING, WorkDirective, WorkSession, WorkSignal
+from clawdlet.work_session import PHASE_JUGGLE, PHASE_TYPING, WorkDirective, WorkSession, WorkSignal
 
 # Offsets of the side random streams from ``rng_seed`` (keeps them apart from ``_rng``)
 _WORK_RNG_OFFSET = 7919
@@ -44,6 +45,19 @@ _BEHAVIOR_RNG_OFFSET = 104729
 _SCREEN_EDGE_PX = 4.0
 _WINDOW_SIDE_PX = 8.0
 _PERCH_EDGE_FRACTION = 0.25  # Of the body width, from either end of the title bar
+
+# Animation names the controller renders instead of ``state.animation_name`` (a test checks that
+# every one of them is in the sprite manifest, so SpriteSheetBank never silently falls back)
+RENDER_OVERRIDE_ANIMATIONS = (
+    "typing_loop",
+    "peek_out",
+    "gaze",
+    "alert_wave",
+    "alert_tap",
+    "laptop_spin",
+    "laptop_wall_hit",
+    "molt_shell",
+)
 
 
 # Resting states that may doze off, pounce, or decide on a new activity
@@ -62,6 +76,9 @@ _STATIONARY_STATES = frozenset({
     PetState.CELEBRATE,
     PetState.ERROR_SWEAT,
     PetState.ALERT,
+    PetState.MOLT,
+    PetState.CONFUSED,
+    PetState.SAD,
 })
 
 # States a work session (Claude thinking / agent busy / manual typing) may interrupt to pull out the
@@ -80,8 +97,14 @@ _WORK_ENTRY_STATES = frozenset({
 })
 
 # Short breaks between typing segments (laptop stays out). Add new break states here.
-_WORK_BREAK_STATES = frozenset({PetState.WORK_GLANCE})
-_WORK_STATES = frozenset({PetState.TYPING, *_WORK_BREAK_STATES})
+_WORK_BREAK_STATES = frozenset({
+    PetState.WORK_GLANCE,
+    PetState.WORK_STRETCH,
+    PetState.WORK_THINK,
+    PetState.WORK_SIP,
+})
+# Typing, juggling subagents (alternates with typing instead of breaks) and the breaks
+_WORK_STATES = frozenset({PetState.TYPING, PetState.JUGGLE, *_WORK_BREAK_STATES})
 
 # States in which clicks, petting, and agent events are ignored (held, airborne, or mid-climb)
 _UNREACTIVE_STATES = frozenset({
@@ -156,6 +179,7 @@ class ProjectileRenderState:
     y: int
     animation_name: str
     elapsed_s: float
+    flip_x: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,6 +199,7 @@ class RenderFrameState:
     window_speed: float = 0.0
     projectile: ProjectileRenderState | None = None
     frame_index: int | None = None  # Controller-chosen pose (e.g. gaze direction); None = time-based
+    shell: ProjectileRenderState | None = None  # Shed molt shell lying where Clawd molted
 
 
 class ClawdletController:
@@ -198,6 +223,17 @@ class ClawdletController:
     CELEBRATE_DURATION_S: float = 1.60   # celebrate: 8 frames @ 5 FPS
     ERROR_SWEAT_DURATION_S: float = 1.40 # error_sweat: 6 frames @ 4.3 FPS
     WORK_GLANCE_POKE_S: float = 0.75     # Poked while typing: look up briefly, then keep typing
+    # Milestone 6 Claude Code reactions
+    CONFUSED_DURATION_S: float = 1.50    # confused: 6 frames @ 4 FPS
+    SAD_DURATION_S: float = 2.00         # sad: 6 frames @ 3 FPS
+    ERROR_STREAK_WINDOW_S: float = 90.0  # Tool failures this close together escalate
+    MOLT_DURATION_S: float = 1.60        # molt: 8 frames @ 5 FPS
+    MOLT_SHED_S: float = 0.80            # molt frame 4: the empty shell stands at the old spot
+    MOLT_SHIFT_SPRITE_PX: float = 8.0    # Clawd steps out this far (sprite px, toward facing)
+    SHELL_LINGER_S: float = 4.0          # The shed shell stays this long, then is gone
+    SHELL_STRIP_S: float = 3.0           # molt_shell: 6 frames @ 2 FPS (fades on frames 4-5)
+    ALERT_WAVE_S: float = 2.0            # Unanswered '!': wave this long...
+    ALERT_HOLD_S: float = 4.0            # ...then plain '!' this long, repeating
     GAZE_BLINK_S: float = 0.12
     CHASE_SPEED_MULT: float = 1.40       # Chasing the cursor is an excited trot
 
@@ -258,6 +294,17 @@ class ClawdletController:
         self._proj_vy: float = 0.0
         self._proj_elapsed_s: float = 0.0
 
+        # Shed molt shell prop (follows Claude Desktop's title bar when shed while perched)
+        self._molt_shed: bool = False
+        self._shell_active: bool = False
+        self._shell_t: float = 0.0
+        self._shell_x: float = 0.0
+        self._shell_y: float = 0.0
+        self._shell_h: float = 0.0
+        self._shell_flip: bool = False
+        self._shell_hwnd: int | None = None
+        self._shell_off_x: float = 0.0
+
         # Global cursor & user-idle state (Milestone 5)
         self._pointer: PointerSnapshot | None = None
         self._cursor_still_s: float = 0.0
@@ -286,6 +333,8 @@ class ClawdletController:
         self._typing_resumed: bool = False   # TYPING renders typing_loop (no laptop intro)
         self._glance_return_s: float = 0.0   # Manual typing time left when a poke glance started
         self._alert_session: str | None = None
+        # Tool-failure streaks per session: (count, time of the latest failure)
+        self._error_streak: dict[str, tuple[int, float]] = {}
         self._pending_celebrate: bool = False
         self._last_win: WindowSnapshot | None = None
 
@@ -351,6 +400,7 @@ class ClawdletController:
 
     def resize_body(self, new_width: float, new_height: float) -> None:
         """Resize bounding box anchored at the bottom-center (feet level)."""
+        self._shell_active = False  # Sized for the old scale
         old_center_x = self.body.center_x
         old_bottom = self.body.bottom
         self.body.width = new_width
@@ -442,6 +492,55 @@ class ClawdletController:
             if self._proj_elapsed_s >= 1.78:
                 self._proj_active = False
 
+    def _shed_shell(self) -> None:
+        """Leave the empty shell at the pre-molt spot and step out of it (once per molt).
+
+        Matches the molt strip: the husk is drawn at the canonical position and Clawd ends
+        ``MOLT_SHIFT_SPRITE_PX`` further along; mirrored when facing left.
+        """
+        if self._molt_shed:
+            return
+        self._molt_shed = True
+        win = self._last_win
+        flip = self.facing < 0
+        perched = (
+            self._perched_hwnd is not None
+            and win is not None
+            and win.is_perchable
+            and win.hwnd == self._perched_hwnd
+        )
+        self._shell_active = True
+        self._shell_t = 0.0
+        self._shell_x = self.body.x
+        self._shell_y = self.body.y
+        self._shell_h = self.body.height
+        self._shell_flip = flip
+        shift = self.MOLT_SHIFT_SPRITE_PX * self.body.width / 64.0 * (-1.0 if flip else 1.0)
+        if perched:
+            assert win is not None
+            self._shell_hwnd = win.hwnd
+            self._shell_off_x = self.body.x - win.rect.left
+            self.body.x = win.rect.clamp_x(self.body.x + shift, self.body.width)
+            self._perch_offset_x = self.body.x - win.rect.left
+        else:
+            self._shell_hwnd = None
+            self.body.x = self.work_area.clamp_x(self.body.x + shift, self.body.width)
+
+    def _tick_shell(self, dt: float, win: WindowSnapshot | None) -> None:
+        """Age the shed shell; one shed on Claude's title bar rides along with the window."""
+        if not self._shell_active:
+            return
+        self._shell_t += dt
+        if self._shell_t >= self.SHELL_LINGER_S:
+            self._shell_active = False
+            return
+        if self._shell_hwnd is not None:
+            if win is None or not win.is_perchable or win.hwnd != self._shell_hwnd:
+                self._shell_active = False  # Window gone / minimized: the shell goes with it
+                return
+            self._shell_x = win.rect.left + self._shell_off_x
+            self._shell_y = win.rect.top - self._shell_h
+
     def toggle_typing(self) -> bool:
         """Toggle manual laptop-typing mode when grounded or perched (plays for ~6s then puts away)."""
         self.manual_typing = not self.manual_typing
@@ -458,7 +557,7 @@ class ClawdletController:
 
         While typing, Clawd only glances up from the laptop and then keeps working.
         """
-        if not self._can_react():
+        if not self._can_react() or self.state == PetState.MOLT:
             return False
         if self.state in _WORK_STATES:
             self._start_poke_glance()
@@ -476,7 +575,7 @@ class ClawdletController:
 
     def flail(self) -> bool:
         """Rapid clicks: throw a tantrum. Return True if it reacted."""
-        if not self._can_react() or self.state in _LAPTOP_STATES:
+        if not self._can_react() or self.state in _LAPTOP_STATES or self.state == PetState.MOLT:
             return False
         self._alert_session = None
         self._set_state(PetState.FLAIL)
@@ -486,7 +585,7 @@ class ClawdletController:
         """Stroking: glow with hearts; repeated strokes keep it going. Return True if it reacted."""
         if not self._can_react() or self.state in _LAPTOP_STATES:
             return False
-        if self.state in (PetState.FLAIL, PetState.ALERT):
+        if self.state in (PetState.FLAIL, PetState.ALERT, PetState.MOLT):
             return False
         if self.state == PetState.PETTED:
             self._state_timer = 0.0
@@ -500,17 +599,19 @@ class ClawdletController:
         Hooks are authoritative: once a session has sent a hook event, transcript-derived events
         for it are dropped so the two sources can never double-celebrate or flip-flop. The one
         exception is INTERRUPTED, which only the transcript can see (no Stop hook fires on Esc).
+        (So a transcript ``compact_boundary`` only molts sessions without hooks: PreCompact covers
+        the others.)
         """
         if source == HOOK_SOURCE:
             self.agent.hook_sessions.add(session_id)
         elif session_id in self.agent.hook_sessions and event != AgentEvent.INTERRUPTED:
             return
-        if event == AgentEvent.COMPACT:
-            return  # Not acted on yet
         win = self._last_win
         was_busy = self.agent.note(event, session_id, self._clock, source)
         if event == AgentEvent.DONE:
             self._work.note_done(self._clock)  # Ignore the Claude Desktop I/O tail of the finished turn
+        if event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END):
+            self._error_streak.pop(session_id, None)  # The turn is over: the next failure starts fresh
 
         # Any follow-up from the session that raised the alert means it is no longer waiting
         if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING) and session_id == self._alert_session:
@@ -522,9 +623,20 @@ class ClawdletController:
             if self._can_react():
                 self._alert_session = session_id
                 self._set_state(PetState.ALERT)
-        elif event in (AgentEvent.ERROR, AgentEvent.FAILED):
-            if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL):
-                self._set_state(PetState.ERROR_SWEAT, self.ERROR_SWEAT_DURATION_S)
+        elif event == AgentEvent.ERROR:
+            # Escalates within a streak: puzzled, then nervous sweat, then dejected
+            reaction, duration = {
+                1: (PetState.CONFUSED, self.CONFUSED_DURATION_S),
+                2: (PetState.ERROR_SWEAT, self.ERROR_SWEAT_DURATION_S),
+            }.get(self._note_error(session_id), (PetState.SAD, self.SAD_DURATION_S))
+            if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL, PetState.MOLT):
+                self._set_state(reaction, duration)
+        elif event == AgentEvent.FAILED:
+            if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL, PetState.MOLT):
+                self._set_state(PetState.SAD, self.SAD_DURATION_S)
+        elif event == AgentEvent.COMPACT:
+            if self._can_react() and self.state not in (PetState.ALERT, PetState.FLAIL, PetState.MOLT):
+                self._start_molt()
         elif event == AgentEvent.DONE and was_busy:
             if self.state in _WORK_STATES and not self._still_working(win):
                 # Laptop away first (tuck or kick by mode), then the victory dance
@@ -539,6 +651,17 @@ class ClawdletController:
             # counting as busy, so typing winds down on its own)
             if self.state in _WORK_STATES and not self._still_working(win):
                 self._start_stop_typing()
+
+    def _note_error(self, session_id: str) -> int:
+        """Count a tool failure into the session's streak; return its place in the streak."""
+        count, last_t = self._error_streak.get(session_id, (0, float("-inf")))
+        count = count + 1 if self._clock - last_t <= self.ERROR_STREAK_WINDOW_S else 1
+        self._error_streak[session_id] = (count, self._clock)
+        return count
+
+    def _start_molt(self) -> None:
+        self._molt_shed = False
+        self._set_state(PetState.MOLT, self.MOLT_DURATION_S)
 
     def begin_drag(self, cursor_x: float, cursor_y: float) -> None:
         """Grab Clawdlet with the left mouse button."""
@@ -699,11 +822,10 @@ class ClawdletController:
     def _work_signal(self, win: WindowSnapshot | None, manual: bool | None = None) -> WorkSignal:
         """Claude Desktop heuristic thinking (tracker), busy Claude Code sessions (hooks) and manual typing."""
         busy = self.agent.busy(self._clock)
-        subagents = sum(st.subagents for st in self.agent.sessions.values() if st.phase == SESSION_BUSY)
         return WorkSignal(
             heuristic=bool(win is not None and win.is_thinking),
             agent_busy=busy,
-            subagents=subagents,
+            subagents=self.agent.subagents(self._clock),
             manual=self.manual_typing if manual is None else manual,
         )
 
@@ -730,16 +852,34 @@ class ClawdletController:
         self._set_state(PetState.TYPING, duration)
         self._typing_resumed = True
 
-    def _pick_work_break(self) -> PetState:
-        """Draw a break state from the table's ``work_breaks`` (its own stream, never ``_rng``)."""
-        row = self._selector.pick_work_break(
-            self._idle_context(self._last_win, perched=self._perched_hwnd is not None)
+    def _pick_work_break_row(self) -> BehaviorRow | None:
+        """Draw a ``work_breaks`` row (``_behavior_rng`` via the selector, never ``_rng``)."""
+        ctx = self._idle_context(
+            self._last_win, perched=self._perched_hwnd is not None, trigger=WORK_BREAK_TRIGGER
         )
+        return self._selector.pick_work_break(ctx)
+
+    def _pick_work_break(self) -> PetState:
+        row = self._pick_work_break_row()
         return PetState.WORK_GLANCE if row is None else PetState[row.state]
 
     def _start_work_break(self) -> None:
+        """Take the break the table picks; its ``duration_s`` (if any) replaces ``break_s``.
+
+        One-shot strips shorter than the break (stretch 1.5 s, sip 2 s) hold their last frame,
+        which is drawn as the resting typing pose.
+        """
+        row = self._pick_work_break_row()
+        state = PetState.WORK_GLANCE if row is None else PetState[row.state]
+        if row is not None and row.duration_s is not None:
+            self._work.set_phase_len(self._work_rng.uniform(*row.duration_s))
         self.body.vx = 0.0
-        self._set_state(self._pick_work_break(), self._work.phase_len)
+        self._set_state(state, self._work.phase_len)
+
+    def _start_juggle(self) -> None:
+        """Subagents are running: juggle at the open laptop (no intro, same desk layout)."""
+        self.body.vx = 0.0
+        self._set_state(PetState.JUGGLE, self._work.phase_len)
 
     def _start_poke_glance(self) -> None:
         if self.state == PetState.TYPING:
@@ -764,7 +904,10 @@ class ClawdletController:
             if directive == WorkDirective.BREAK and state == PetState.TYPING:
                 self._start_work_break()
                 return True
-            if directive == WorkDirective.RESUME and state in _WORK_BREAK_STATES:
+            if directive == WorkDirective.JUGGLE and state != PetState.JUGGLE:
+                self._start_juggle()
+                return True
+            if directive == WorkDirective.RESUME and (state in _WORK_BREAK_STATES or state == PetState.JUGGLE):
                 self._resume_typing()
                 return True
             return False
@@ -795,9 +938,18 @@ class ClawdletController:
             return
         if self.manual_typing or self._work.phase == PHASE_TYPING:
             self._resume_typing()
+        elif self._work.phase == PHASE_JUGGLE:
+            self._start_juggle()  # Poked mid-juggle: back to the balls
         elif not self._work.active:
             self._start_stop_typing()
         # Otherwise the session is still on its break: keep glancing until RESUME / END
+
+    def _advance_juggle(self, win: WindowSnapshot | None) -> None:
+        """Juggling follows the work session's directives; this only catches a missed hand-off."""
+        if self.manual_typing or self._work.phase == PHASE_TYPING:
+            self._resume_typing()
+        elif not self._work.active:
+            self._start_stop_typing()
 
     # --- Milestone 5: shared reaction plumbing --------------------------------------------------
 
@@ -807,6 +959,8 @@ class ClawdletController:
         return self._clock
 
     def _set_state(self, state: PetState, duration: float | None = None) -> None:
+        if self.state == PetState.MOLT and state != PetState.MOLT and self._state_timer >= self.MOLT_SHED_S:
+            self._shed_shell()  # Cut short (e.g. an alert) after the shell already split off
         self.state = state
         self._state_timer = 0.0
         if duration is not None:
@@ -1055,9 +1209,15 @@ class ClawdletController:
             PetState.WAKE_STARTLE: self.WAKE_DURATION_S,
             PetState.CELEBRATE: self.CELEBRATE_DURATION_S,
             PetState.ERROR_SWEAT: self.ERROR_SWEAT_DURATION_S,
+            PetState.CONFUSED: self.CONFUSED_DURATION_S,
+            PetState.SAD: self.SAD_DURATION_S,
         }
         if s in timed:
             if t >= timed[s]:
+                self._return_to_rest(win)  # The work session pulls the laptop back out if still busy
+        elif s == PetState.MOLT:
+            if t >= self.MOLT_DURATION_S:
+                self._shed_shell()
                 self._return_to_rest(win)
         elif s == PetState.POUNCE:
             if t >= self.POUNCE_CROUCH_S:
@@ -1115,7 +1275,7 @@ class ClawdletController:
 
     # --- Milestone 6: data-driven idle choices (behavior table) ---------------------------------
 
-    def _idle_context(self, win: WindowSnapshot | None, perched: bool) -> IdleContext:
+    def _idle_context(self, win: WindowSnapshot | None, perched: bool, trigger: str = "rest") -> IdleContext:
         """Describe the current situation for the behavior table's ``when`` conditions."""
         body = self.body
         p = self._pointer
@@ -1171,7 +1331,7 @@ class ClawdletController:
             claude_foreground=bool(win is not None and win.foreground),
             cursor_in_window=cursor_in_window,
             prev_state=self.state.name,
-            trigger="rest",
+            trigger=trigger,
             now=self._clock,
         )
 
@@ -1439,6 +1599,8 @@ class ClawdletController:
             self._advance_typing(win)
         elif self.state in _WORK_BREAK_STATES:
             self._advance_work_break(win)
+        elif self.state == PetState.JUGGLE:
+            self._advance_juggle(win)
         elif self._state_timer >= self._decision_duration:
             self._transition_from_perch(win)
         if self._perched_hwnd is None:
@@ -1520,6 +1682,7 @@ class ClawdletController:
         self._update_pointer(dt, pointer)
         self._last_win = win
         self._tick_projectile(dt)
+        self._tick_shell(dt, win)
         # Work session first: the perch / floor paths below apply its directive via _step_work
         self._work_sig = self._work_signal(win)
         self._work_directive = self._work.update(dt, self._work_sig, self._clock, self.activity_mode)
@@ -1689,6 +1852,8 @@ class ClawdletController:
                 self._advance_typing(win)
             elif self.state in _WORK_BREAK_STATES:
                 self._advance_work_break(win)
+            elif self.state == PetState.JUGGLE:
+                self._advance_juggle(win)
             elif self.state in (
                 PetState.IDLE,
                 PetState.BLOB,
@@ -1761,7 +1926,20 @@ class ClawdletController:
                 elapsed_s=self._proj_elapsed_s,
             )
 
+        shell_state: ProjectileRenderState | None = None
+        if self._shell_active:
+            shell_state = ProjectileRenderState(
+                x=round(self._shell_x),
+                y=round(self._shell_y),
+                animation_name="molt_shell",
+                # Sits whole for the first second, then the strip plays out (fading on frames 4-5)
+                elapsed_s=max(0.0, self._shell_t - (self.SHELL_LINGER_S - self.SHELL_STRIP_S)),
+                flip_x=self._shell_flip,
+            )
+
         animation_name = self.state.animation_name
+        if self.state == PetState.ALERT:
+            animation_name = self._alert_animation()
         if self.state == PetState.TYPING and self._typing_resumed:
             animation_name = "typing_loop"  # Laptop already out: skip the intro frames
         if self.state == PetState.PEEK_EDGE and self._cursor_near(120.0):
@@ -1786,4 +1964,16 @@ class ClawdletController:
             locked_hwnd=win.hwnd if (win is not None and win.is_perchable) else None,
             window_speed=win_vel.magnitude,
             projectile=proj_state,
+            shell=shell_state,
         )
+
+    def _alert_animation(self) -> str:
+        """Unanswered '!' escalates (MS Agent GetAttention -> Continued -> Return): after
+        ``alert_escalate_s`` it waves for ``ALERT_WAVE_S`` (knocks on the title bar when perched),
+        then shows the plain '!' for ``ALERT_HOLD_S``, repeating. Render-only: the state stays
+        ALERT and the body stays put (alert_wave's hop frames are drawn inside the sprite).
+        """
+        t = self._state_timer - self.behavior_table.settings.alert_escalate_s
+        if t < 0.0 or t % (self.ALERT_WAVE_S + self.ALERT_HOLD_S) >= self.ALERT_WAVE_S:
+            return PetState.ALERT.animation_name
+        return "alert_tap" if self._perched_hwnd is not None else "alert_wave"

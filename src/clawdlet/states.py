@@ -37,6 +37,14 @@ class PetState(str, Enum):
     PUSH_WINDOW = "push_window"
     # Milestone 6 work sessions
     WORK_GLANCE = "work_glance"
+    WORK_STRETCH = "work_stretch"
+    WORK_THINK = "work_think"
+    WORK_SIP = "work_sip"
+    JUGGLE = "juggle"            # Subagents running: juggle them at the laptop
+    # Milestone 6 Claude Code reactions
+    MOLT = "molt"                # The conversation was compacted: shed the old shell
+    CONFUSED = "confused"        # First tool failure in a streak
+    SAD = "sad"                  # Third failure in a streak, or a turn that failed outright
 
     @property
     def animation_name(self) -> str:

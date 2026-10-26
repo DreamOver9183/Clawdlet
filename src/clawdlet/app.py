@@ -21,7 +21,14 @@ from clawdlet.agent_events import (
     format_hook_settings,
     load_or_create_token,
 )
-from clawdlet.hook_install import default_settings_path, hooks_installed, install_hooks, uninstall_hooks
+from clawdlet.hook_install import (
+    HOOKS_CURRENT,
+    HOOKS_OUTDATED,
+    default_settings_path,
+    hook_install_state,
+    install_hooks,
+    uninstall_hooks,
+)
 from clawdlet.transcript_watch import TranscriptWatcher
 from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
 from clawdlet.behavior_table import (
@@ -231,12 +238,22 @@ class HookSetup:
     confirm: Callable[[str], bool] = confirm_dialog
 
 
-def hooks_status_text(setup: HookSetup | None, installed: bool) -> str:
+def hooks_status_text(setup: HookSetup | None, installed: bool, outdated: bool = False) -> str:
     if setup is None or not setup.listening:
         return "Claude Code Hooks：關閉 (Off)"
     if installed:
         return f"Claude Code Hooks：已安裝・監聽中 127.0.0.1:{setup.port}"
+    if outdated:
+        return f"Claude Code Hooks：需要更新 (Outdated)・監聽中 127.0.0.1:{setup.port}"
     return f"Claude Code Hooks：未安裝（對話紀錄監看中）:{setup.port}"
+
+
+def refresh_hook_status(setup: HookSetup, tray_state: TrayMenuState) -> None:
+    """Re-read settings.json: installed / outdated (older Clawdlet, other port or token) / none."""
+    state = hook_install_state(setup.settings_path, setup.port, setup.token)
+    tray_state.hooks_installed = state == HOOKS_CURRENT
+    tray_state.hooks_outdated = state == HOOKS_OUTDATED
+    tray_state.hooks_status = hooks_status_text(setup, tray_state.hooks_installed, tray_state.hooks_outdated)
 
 
 def toggle_hook_install(setup: HookSetup, tray_state: TrayMenuState) -> None:
@@ -247,16 +264,17 @@ def toggle_hook_install(setup: HookSetup, tray_state: TrayMenuState) -> None:
             return
         result = uninstall_hooks(setup.settings_path)
     else:
+        # Install, or update an older install in place (our old entries are replaced)
+        verb = "更新" if tray_state.hooks_outdated else "寫入"
         question = (
-            f"把 Clawdlet 的 Claude Code hooks 寫入 {setup.settings_path}？\n"
+            f"把 Clawdlet 的 Claude Code hooks {verb}到 {setup.settings_path}？\n"
             "只會新增指向 127.0.0.1 的項目，其他設定保持不變，並會先備份原檔。"
         )
         if not setup.confirm(question):
             return
         result = install_hooks(setup.settings_path, setup.port, setup.token)
     print(f"[Clawdlet] {result.message}" + (f" (backup: {result.backup})" if result.backup else ""))
-    tray_state.hooks_installed = hooks_installed(setup.settings_path, setup.port)
-    tray_state.hooks_status = hooks_status_text(setup, tray_state.hooks_installed)
+    refresh_hook_status(setup, tray_state)
 
 
 def print_behavior_warnings(table: BehaviorTable) -> None:
@@ -441,8 +459,9 @@ def main(argv: list[str] | None = None) -> int:
             port = int(hook_server.port or args.hook_port)
             hook_config = format_hook_settings(port, token)
             hook_setup = HookSetup(port=port, token=token, settings_path=settings_path, listening=True)
-            tray_state.hooks_installed = hooks_installed(settings_path, port)
-            tray_state.hooks_status = hooks_status_text(hook_setup, tray_state.hooks_installed)
+            refresh_hook_status(hook_setup, tray_state)
+            if tray_state.hooks_outdated:
+                print("[Clawdlet] Claude Code hooks are from an older Clawdlet: tray > Update Hooks.")
         else:
             print(
                 f"[Clawdlet] Port {args.hook_port} is busy; Claude Code hooks disabled.",

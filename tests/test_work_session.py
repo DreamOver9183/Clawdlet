@@ -7,7 +7,12 @@ import random
 import pytest
 
 from clawdlet.agent_events import AgentEvent
-from clawdlet.behavior import ClawdletController, PetState, WindowSnapshot
+from clawdlet.behavior import (
+    _WORK_BREAK_STATES,
+    ClawdletController,
+    PetState,
+    WindowSnapshot,
+)
 from clawdlet.config import ActivityMode
 from clawdlet.geometry import Rect
 from clawdlet.input_state import PointerSnapshot
@@ -188,9 +193,9 @@ def test_desktop_heuristic_alone_caps_typing_at_a_minute() -> None:
     caps = [t for t, d in directives if d == WorkDirective.CAP]
     assert caps == [pytest.approx(CFG.heuristic_max_s, abs=0.1)]
     assert states[0] == PetState.TYPING
-    assert PetState.WORK_GLANCE in states[: int(CFG.heuristic_max_s / DT)]  # Breaks happen, too
+    assert _WORK_BREAK_STATES & set(states[: int(CFG.heuristic_max_s / DT)])  # Breaks happen, too
     cooldown = [s for t, s in zip(times, states) if caps[0] + 2.0 < t < caps[0] + CFG.heuristic_cooldown_s]
-    assert PetState.TYPING not in cooldown and PetState.WORK_GLANCE not in cooldown
+    assert PetState.TYPING not in cooldown and not _WORK_BREAK_STATES & set(cooldown)
     assert PetState.PUT_AWAY_LAPTOP in states[int(caps[0] / DT) - 2 :]
     after = [s for t, s in zip(times, states) if t >= caps[0] + CFG.heuristic_cooldown_s]
     assert PetState.TYPING in after  # The heuristic counts again once the cooldown is over
@@ -212,11 +217,11 @@ def test_long_hook_turn_types_in_segments_with_breaks(where: str) -> None:
     assert states[0] == PetState.TYPING
     longest = _longest_run(states, PetState.TYPING) * DT
     assert longest <= CFG.segment_s[ActivityMode.NORMAL][1] + 0.1
-    breaks = sum(1 for a, b in zip(states, states[1:]) if a == PetState.TYPING and b == PetState.WORK_GLANCE)
-    assert breaks >= 120.0 // (CFG.segment_s[ActivityMode.NORMAL][1] + CFG.break_s[1])
-    assert set(states) == {PetState.TYPING, PetState.WORK_GLANCE}  # Laptop never put away
+    breaks = sum(1 for a, b in zip(states, states[1:]) if a == PetState.TYPING and b in _WORK_BREAK_STATES)
+    assert breaks >= 120.0 // (CFG.segment_s[ActivityMode.NORMAL][1] + 5.0)  # Longest table break: 5 s
+    assert set(states) <= {PetState.TYPING, *_WORK_BREAK_STATES}  # Laptop never put away
     # Back from a break: the loop strip, not the 11-frame laptop intro
-    resumed = [f for f, prev in zip(frames[1:], states) if prev == PetState.WORK_GLANCE and f.state == PetState.TYPING]
+    resumed = [f for f, prev in zip(frames[1:], states) if prev in _WORK_BREAK_STATES and f.state == PetState.TYPING]
     assert resumed and all(f.animation_name == "typing_loop" for f in resumed)
     assert frames[0].animation_name == "typing_laptop"
     # Regression: the state timer runs on during a typing segment (no per-frame reset)
@@ -236,8 +241,8 @@ def test_breaks_never_flip_the_laptop() -> None:
         frames.append(ctrl.tick(DT, None))
         if len(frames) % 300 == 0:
             ctrl.handle_agent_event(AgentEvent.BUSY, "s")
-    assert any(f.state == PetState.WORK_GLANCE for f in frames)
-    assert all(not f.flip_x for f in frames if f.state in (PetState.TYPING, PetState.WORK_GLANCE))
+    assert any(f.state in _WORK_BREAK_STATES for f in frames)
+    assert all(not f.flip_x for f in frames if f.state in {PetState.TYPING, *_WORK_BREAK_STATES})
 
 
 def test_heuristic_tail_after_done_does_not_restart_typing() -> None:
@@ -283,7 +288,7 @@ def test_work_rng_is_separate_from_the_fsm_rng() -> None:
     for _ in range(12):
         ctrl.handle_agent_event(AgentEvent.BUSY, "s")
         states += [ctrl.tick(DT, None).state for _ in range(int(round(5.0 / DT)))]
-    assert PetState.WORK_GLANCE in states
+    assert _WORK_BREAK_STATES & set(states)
     assert ctrl._rng.getstate() == before  # Segments and breaks never draw from _rng
 
 

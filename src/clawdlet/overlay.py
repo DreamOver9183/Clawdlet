@@ -9,7 +9,7 @@ from PIL import ImageTk
 import win32con
 import win32gui
 
-from clawdlet.behavior import ClawdletController, PetState, RenderFrameState
+from clawdlet.behavior import ClawdletController, PetState, ProjectileRenderState, RenderFrameState
 from clawdlet.gestures import (
     ClickGestureRecognizer,
     Gesture,
@@ -17,6 +17,20 @@ from clawdlet.gestures import (
     system_double_click_s,
 )
 from clawdlet.sprites import CHROMA_KEY_HEX, CHROMA_KEY_RGB, SpriteFrame, SpriteSheetBank
+
+
+class _PropSlot:
+    """A secondary transparent Toplevel showing one prop sprite (kicked laptop, shed shell)."""
+
+    def __init__(self, win: tk.Toplevel, canvas: tk.Canvas, image_item: int, below_pet: bool = False) -> None:
+        self.win = win
+        self.canvas = canvas
+        self.image_item = image_item
+        self.below_pet = below_pet  # Re-raise the pet over it when shown (the shell lies behind Clawd)
+        self.photo: ImageTk.PhotoImage | None = None
+        self.visible: bool = False
+        self.last_pos: tuple[int, int] | None = None
+        self.last_key: tuple[str, int, int, bool] | None = None
 
 
 class ClawdletOverlay:
@@ -46,11 +60,10 @@ class ClawdletOverlay:
         self._last_pos: tuple[int, int] | None = None
         self._last_render_key: tuple[str, int, int, int, bool, int] | None = None
 
-        # Secondary projectile overlay for kicked laptop flying to the screen edge
-        self._proj_photo: ImageTk.PhotoImage | None = None
-        self._proj_visible: bool = False
-        self._proj_last_pos: tuple[int, int] | None = None
-        self._proj_last_key: tuple[str, int, int] | None = None
+        # Secondary prop overlays: the kicked laptop (created up front) and the shed molt shell
+        # (created on first use)
+        self._proj_slot: _PropSlot | None = None
+        self._shell_slot: _PropSlot | None = None
 
         # Mouse gestures: clicks/drags are settled by the recognizer, polled once per frame by the app
         self._clicks = ClickGestureRecognizer(double_click_s=system_double_click_s())
@@ -126,27 +139,32 @@ class ClawdletOverlay:
         self.canvas.bind("<Leave>", self._on_leave)
 
         # Configure secondary transparent projectile window (hidden until kicked laptop spawns)
-        self._proj_win = tk.Toplevel(self.root)
-        self._proj_win.title("ClawdletProjectile")
-        self._proj_win.overrideredirect(True)
-        self._proj_win.wm_attributes("-topmost", True)
-        self._proj_win.wm_attributes("-transparentcolor", CHROMA_KEY_HEX)
-        self._proj_win.configure(bg=CHROMA_KEY_HEX)
-        self._proj_canvas = tk.Canvas(
-            self._proj_win,
+        self._proj_slot = self._create_prop_window("ClawdletProjectile")
+
+        self.root.update_idletasks()
+        if self.click_through:
+            self.set_click_through(True)
+
+    def _create_prop_window(self, title: str, below_pet: bool = False) -> _PropSlot:
+        """A hidden, frameless, always-on-top color-keyed Toplevel the size of the pet window."""
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.overrideredirect(True)
+        win.wm_attributes("-topmost", True)
+        win.wm_attributes("-transparentcolor", CHROMA_KEY_HEX)
+        win.configure(bg=CHROMA_KEY_HEX)
+        canvas = tk.Canvas(
+            win,
             width=self.width,
             height=self.height,
             bg=CHROMA_KEY_HEX,
             highlightthickness=0,
             bd=0,
         )
-        self._proj_canvas.pack(fill="both", expand=True)
-        self._proj_image_item = self._proj_canvas.create_image(0, 0, anchor="nw")
-        self._proj_win.withdraw()
-
-        self.root.update_idletasks()
-        if self.click_through:
-            self.set_click_through(True)
+        canvas.pack(fill="both", expand=True)
+        image_item = canvas.create_image(0, 0, anchor="nw")
+        win.withdraw()
+        return _PropSlot(win, canvas, image_item, below_pet)
 
     def set_click_through(self, enabled: bool) -> None:
         """Toggle WS_EX_TRANSPARENT on outer TkTopLevel so mouse clicks pass through."""
@@ -190,11 +208,13 @@ class ClawdletOverlay:
 
         self.canvas.configure(width=self.width, height=self.height)
         self.canvas.coords(self._debug_bg_item, 0, 0, self.width, 18)
-        self._proj_canvas.configure(width=self.width, height=self.height)
+        for slot in (self._proj_slot, self._shell_slot):
+            if slot is not None:
+                slot.canvas.configure(width=self.width, height=self.height)
+                slot.last_key = None
+                slot.last_pos = None
         self._last_render_key = None
         self._last_pos = None
-        self._proj_last_key = None
-        self._proj_last_pos = None
         nx = round(self.controller.body.x)
         ny = round(self.controller.body.y)
         self.root.geometry(f"{self.width}x{self.height}+{nx}+{ny}")
@@ -250,35 +270,46 @@ class ClawdletOverlay:
         self.root.wm_attributes("-topmost", True)
 
         # Sync cross-screen kicked laptop projectile window
-        proj = state.projectile
-        if proj is None:
-            if self._proj_visible:
-                self._proj_win.withdraw()
-                self._proj_visible = False
-                self._proj_last_pos = None
-        else:
-            if not self._proj_visible:
-                self._proj_win.deiconify()
-                self._proj_win.wm_attributes("-topmost", True)
-                self._proj_visible = True
+        if self._proj_slot is not None:
+            self._sync_prop_window(self._proj_slot, state.projectile)
+        # Shed molt shell: its window is only created the first time Clawd molts
+        if state.shell is not None and self._shell_slot is None:
+            self._shell_slot = self._create_prop_window("ClawdletShell", below_pet=True)
+        if self._shell_slot is not None:
+            self._sync_prop_window(self._shell_slot, state.shell)
 
-            pframe = self.sprite_bank.get_frame(proj.animation_name, proj.elapsed_s)
-            pkey = (proj.animation_name, id(pframe.image), self.sprite_bank.scale)
-            if pkey != self._proj_last_key or self._proj_photo is None:
-                self._proj_last_key = pkey
-                pcomp = pframe.render_with_squash(
-                    scale_x=1.0,
-                    scale_y=1.0,
-                    flip_x=False,
-                    chroma_rgb=CHROMA_KEY_RGB,
-                )
-                self._proj_photo = ImageTk.PhotoImage(pcomp, master=self.root)
-                self._proj_canvas.itemconfigure(self._proj_image_item, image=self._proj_photo)
+    def _sync_prop_window(self, slot: _PropSlot, prop: ProjectileRenderState | None) -> None:
+        """Show / hide / move one prop window and redraw it only when its frame changes."""
+        if prop is None:
+            if slot.visible:
+                slot.win.withdraw()
+                slot.visible = False
+                slot.last_pos = None
+            return
+        if not slot.visible:
+            slot.win.deiconify()
+            slot.win.wm_attributes("-topmost", True)
+            slot.visible = True
+            if slot.below_pet:
+                self.root.lift()
 
-            ppos = (proj.x, proj.y)
-            if ppos != self._proj_last_pos:
-                self._proj_last_pos = ppos
-                self._proj_win.geometry(f"{self.width}x{self.height}+{proj.x}+{proj.y}")
+        pframe = self.sprite_bank.get_frame(prop.animation_name, prop.elapsed_s)
+        pkey = (prop.animation_name, id(pframe.image), self.sprite_bank.scale, prop.flip_x)
+        if pkey != slot.last_key or slot.photo is None:
+            slot.last_key = pkey
+            pcomp = pframe.render_with_squash(
+                scale_x=1.0,
+                scale_y=1.0,
+                flip_x=prop.flip_x,
+                chroma_rgb=CHROMA_KEY_RGB,
+            )
+            slot.photo = ImageTk.PhotoImage(pcomp, master=self.root)
+            slot.canvas.itemconfigure(slot.image_item, image=slot.photo)
+
+        ppos = (prop.x, prop.y)
+        if ppos != slot.last_pos:
+            slot.last_pos = ppos
+            slot.win.geometry(f"{self.width}x{self.height}+{prop.x}+{prop.y}")
 
     def poll_gestures(self, now: float) -> list[Gesture]:
         """Return gestures completed since the last frame (settled clicks, combos, strokes)."""

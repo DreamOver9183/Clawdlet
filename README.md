@@ -24,8 +24,8 @@ let clawd = new WindowCompanion({ gravity: true });
 
 ### 2. Comedic Side-Profile Laptop Typing | 喜感側面掏筆電重摔打字 (`\_`)
 - When Claude Desktop is actively thinking/generating—or when you **double-click** Clawdlet—it pulls a sleek `8×2` Ultrabook out of its belly, jumps high overhead, **slams the laptop down** into a side-profile `\_` shape with shockwave sparks, and stretches out **two long arms** to hammer away at the keyboard!
-- **Work sessions (`工作節奏`)**: typing comes in segments (Quiet 20–40 s, Normal 14–28 s, Hyper 8–16 s) with short 2.5–4.5 s breaks where Clawd glances up from the laptop. When Claude Desktop's I/O heuristic is the only signal, typing stops after 60 s and the heuristic is ignored for the next 90 s (Claude Code hooks / transcripts still work), and for 8 s after a finished turn so the Desktop's trailing I/O doesn't restart it.
-  打字改成一段一段：每段 安靜 20–40 秒／標準 14–28 秒／過動 8–16 秒，中間會抬頭看一眼休息 2.5–4.5 秒。只有 Claude Desktop 的 I/O 推測訊號時，最多連續打字 60 秒，之後 90 秒不理會這個訊號（Claude Code 的 hook／transcript 不受影響）；回合結束後 8 秒內也會忽略 Desktop 的 I/O 尾巴。
+- **Work sessions (`工作節奏`)**: typing comes in segments (Quiet 20–40 s, Normal 14–28 s, Hyper 8–16 s) with short breaks between them, drawn from the behavior table's `work_breaks`: Clawd **stretches** (伸懶腰), **rests its chin and thinks** with a `…` (托腮思考), **sips from a steaming mug** (喝咖啡) or glances up from the laptop. Stretching and coffee have a cooldown so they don't repeat back to back. When Claude Desktop's I/O heuristic is the only signal, typing stops after 60 s and the heuristic is ignored for the next 90 s (Claude Code hooks / transcripts still work), and for 8 s after a finished turn so the Desktop's trailing I/O doesn't restart it.
+  打字改成一段一段：每段 安靜 20–40 秒／標準 14–28 秒／過動 8–16 秒，中間從行為設定檔的 `work_breaks` 抽一種休息：伸懶腰、托腮思考（頭上「…」）、喝咖啡，或抬頭看一眼（伸懶腰與喝咖啡有冷卻時間）。只有 Claude Desktop 的 I/O 推測訊號時，最多連續打字 60 秒，之後 90 秒不理會這個訊號（Claude Code 的 hook／transcript 不受影響）；回合結束後 8 秒內也會忽略 Desktop 的 I/O 尾巴。
 
 ### 3. Mode-Dependent Laptop Put-Away & Cross-Screen Kick | 依模式分流的收筆電／踢飛大爆炸
 - **Standard / Quiet Mode (`標準／安靜模式`)**: Neatly closes the `\_` laptop lid, picks up the folded Ultrabook, tucks it back into its belly, and pats its stomach (`put_away_laptop`).
@@ -51,10 +51,15 @@ Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://cod
 
 | Hook event | Clawdlet reaction | 反應 |
 | :--- | :--- | :--- |
-| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `SubagentStart` | Laptop out, typing | 掏筆電打字 |
+| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` | Laptop out, typing in segments with breaks (stretch / think / coffee) | 掏筆電打字，段落間伸懶腰／托腮思考／喝咖啡 |
+| `SubagentStart` / `SubagentStop` | While subagents run, Clawd **juggles** them at the laptop, taking turns with typing (6–10 s each); back to typing when the last one stops | 有 subagent 時**拋球**，和打字輪流；最後一個結束就回去打字 |
+| `PreCompact` | **Molts**: sheds its shell and steps out of it; the empty husk lies there for a few seconds, then fades (hook-less sessions: the transcript's `compact_boundary`) | **蛻殼**：脫下舊殼走出來，空殼留幾秒後淡出 |
 | `Stop` | Laptop away (tuck or kick), then a **victory dance** | 收／踢筆電後慶祝 |
-| `PostToolUseFailure` / `StopFailure` | Nervous **sweat** | 冒冷汗 |
-| `Notification` (permission / input needed) | Bobbing golden **`!`** until you respond or click Clawd | 頭上跳「!」 |
+| `PostToolUseFailure` | Escalates within 90 s: **confused** `?` → nervous **sweat** → **sad**; a finished turn starts over | 90 秒內連續失敗會升級：困惑 → 冒汗 → 沮喪；回合結束就歸零 |
+| `StopFailure` | **Sad** right away, no victory dance | 直接沮喪，不慶祝 |
+| `Notification` (permission / input needed) | Bobbing golden **`!`** until you respond or click Clawd; still unanswered after 10 s, it **waves** both claws (knocks on the title bar when perched) for 2 s every 6 s | 頭上跳「!」；10 秒沒人理就揮手（在標題列上改成敲標題列），每 6 秒揮 2 秒 |
+
+`alert_escalate_s` and `work.juggle_segment_s` live in the [behavior config](#-behavior-config--行為設定檔)'s `settings`. | 揮手前的等待時間與拋球／打字輪替長度可在行為設定檔的 `settings` 調整。
 
 Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Code 分頁都適用）:
 
@@ -62,6 +67,8 @@ Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Cod
    只讀紀錄的結構（type／subtype、`isMeta` 等旗標，以及使用者紀錄是否以 Claude Code 自己的標記開頭），不讀也不保存對話內容。slash 指令不算工作；按 Esc 中斷會收起筆電但不慶祝；工具呼叫 25 秒沒動靜（多半在等權限確認）就停止打字。
 2. **One-click install | 一鍵安裝（推薦）**: Tray menu → **安裝 Claude Code hooks (Install Hooks)** (asks for confirmation) or `clawdlet --install-hooks`. Clawdlet backs up `~/.claude/settings.json` to `settings.json.clawdlet-bak-<timestamp>`, adds only its own `http` entries pointing at `127.0.0.1`, and leaves everything else untouched. Remove them again from the same tray item or with `clawdlet --uninstall-hooks`.
 3. **Manual | 手動**: Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)** or `clawdlet --print-hook-config`, then merge the `hooks` block yourself.
+
+**Updating | 更新 hooks**: newer Clawdlet versions listen to more hook events (`SubagentStop` and `PreCompact` were added for juggling and molting). If your `settings.json` has hooks from an older Clawdlet (or for another port / an old token), the tray shows **更新 Claude Code hooks (Update Hooks)** instead of the install item; choosing it (or running `clawdlet --install-hooks` again) replaces Clawdlet's own entries in place, with a backup, and keeps your other hooks — including your own `PreCompact` hooks. | 舊版 Clawdlet 裝的 hooks 少了 `SubagentStop`、`PreCompact`，Tray 會顯示「更新 Claude Code hooks (Update Hooks)」，點一下（或再跑一次 `clawdlet --install-hooks`）就會就地換掉 Clawdlet 自己的項目，先備份，其他 hooks 原封不動。
 
 When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice. The one exception is an Esc interrupt, which fires no hook and is always taken from the transcript. | 同一個 session 以 hooks 為準；只有 Esc 中斷（不會觸發 hook）一律採用 transcript。
 
@@ -133,6 +140,7 @@ clawdlet --behaviors D:\my-behaviors.json  # Merge this behavior file instead of
 clawdlet --dump-behaviors                  # Print the merged behavior table as JSON (warnings on stderr) and exit
 clawdlet-dump-windows                      # Diagnostic tool to inspect detected Claude.exe HWNDs
 python -m clawdlet.tools.send_hook_event Stop   # Dev: send a fake hook event to a running Clawdlet
+python -m clawdlet.tools.send_hook_event Notification --notification-type idle_prompt  # ...with a notification_type
 ```
 
 ### Build Standalone `clawdlet.exe` | 打包單一執行檔

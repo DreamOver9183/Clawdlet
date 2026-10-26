@@ -50,7 +50,9 @@ HOOK_EVENT_MAP: dict[str, AgentEvent] = {
     "UserPromptSubmit": AgentEvent.BUSY,
     "PreToolUse": AgentEvent.BUSY,
     "PostToolUse": AgentEvent.BUSY,
-    "SubagentStart": AgentEvent.BUSY,
+    "SubagentStart": AgentEvent.SUBAGENT_START,  # Also counts as busy
+    "SubagentStop": AgentEvent.SUBAGENT_STOP,
+    "PreCompact": AgentEvent.COMPACT,
     "PostToolUseFailure": AgentEvent.ERROR,
     "Notification": AgentEvent.ATTENTION,
     "PermissionRequest": AgentEvent.ATTENTION,
@@ -67,6 +69,8 @@ DEFAULT_HOOK_EVENTS: tuple[str, ...] = (
     "PostToolUse",
     "PostToolUseFailure",
     "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
     "Notification",
     "Stop",
     "StopFailure",
@@ -148,10 +152,17 @@ class AgentActivity:
         self._expire(now)
         return any(st.phase == SESSION_BUSY for st in self.sessions.values())
 
+    def subagents(self, now: float) -> int:
+        """Subagents running across the busy sessions."""
+        self._expire(now)
+        return sum(st.subagents for st in self.sessions.values() if st.phase == SESSION_BUSY)
+
     def note(self, event: AgentEvent, session_id: str, now: float, source: str = HOOK_SOURCE) -> bool:
         """Record an event; return whether the session was busy just before it."""
         was_busy = self.is_session_busy(session_id, now)
         st = self.sessions.get(session_id)
+        if event == AgentEvent.SUBAGENT_STOP and st is None:
+            return was_busy  # A late SubagentStop after the turn ended must not revive the session
         if event in (AgentEvent.BUSY, AgentEvent.ERROR, AgentEvent.SUBAGENT_START, AgentEvent.SUBAGENT_STOP):
             if st is None:
                 st = self.sessions[session_id] = SessionState(SESSION_BUSY, now, source=source)
@@ -165,7 +176,8 @@ class AgentActivity:
                 st = self.sessions[session_id] = SessionState(SESSION_WAITING, now, source=source)
             st.phase, st.last_t, st.source = SESSION_WAITING, now, source
         elif event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END, AgentEvent.INTERRUPTED):
-            self.sessions.pop(session_id, None)
+            self.sessions.pop(session_id, None)  # Its subagent count goes with it
+        # COMPACT changes nothing here: the controller molts, the session keeps its phase
         return was_busy
 
     def describe(self, now: float) -> str:

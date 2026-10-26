@@ -15,7 +15,8 @@
       },
       "break_s": [2.5, 4.5],
       "heuristic_max_s": 60.0,
-      "heuristic_cooldown_s": 90.0
+      "heuristic_cooldown_s": 90.0,
+      "juggle_segment_s": [6.0, 10.0]
     }
   },
   "behaviors": [
@@ -76,9 +77,33 @@
   ],
   "work_breaks": [
     {
+      "id": "stretch",
+      "state": "WORK_STRETCH",
+      "weight": 3.0,
+      "duration_s": [2.5, 3.5],
+      "cooldown_s": 60.0,
+      "description": "Stretch both claws overhead beside the laptop (the strip holds its last, resting frame)."
+    },
+    {
+      "id": "think",
+      "state": "WORK_THINK",
+      "weight": 4.0,
+      "duration_s": [3.0, 5.0],
+      "description": "Rest the chin on a claw and ponder, '...' over the head."
+    },
+    {
+      "id": "sip",
+      "state": "WORK_SIP",
+      "weight": 3.0,
+      "duration_s": [2.5, 4.0],
+      "cooldown_s": 90.0,
+      "description": "Sip from the steaming mug next to the laptop."
+    },
+    {
       "id": "glance",
       "state": "WORK_GLANCE",
-      "weight": 1.0,
+      "weight": 2.0,
+      "duration_s": [1.5, 2.5],
       "description": "Look up from the laptop for a moment."
     }
   ],

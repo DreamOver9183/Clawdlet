@@ -56,6 +56,14 @@ class TrayMenuState:
     window_push: bool = False
     hooks_status: str = "Claude Code Hooks：關閉 (Off)"
     hooks_installed: bool = False
+    hooks_outdated: bool = False  # Installed by an older Clawdlet: the menu offers "Update Hooks"
+
+
+def hook_install_label(state: TrayMenuState) -> str:
+    """The hooks menu item: Install (checked when current), or Update for an older install."""
+    if state.hooks_outdated and not state.hooks_installed:
+        return "更新 Claude Code hooks (Update Hooks)"
+    return "安裝 Claude Code hooks（~/.claude/settings.json）(Install Hooks)"
 
 
 def confirm_dialog(text: str, title: str = "Clawdlet") -> bool:
@@ -278,12 +286,7 @@ class Win32TrayIcon:
         install_flags = win32con.MF_STRING | (
             win32con.MF_CHECKED if self.state.hooks_installed else win32con.MF_UNCHECKED
         )
-        win32gui.AppendMenu(
-            menu,
-            install_flags,
-            CMD_TOGGLE_HOOK_INSTALL,
-            "安裝 Claude Code hooks（~/.claude/settings.json）(Install Hooks)",
-        )
+        win32gui.AppendMenu(menu, install_flags, CMD_TOGGLE_HOOK_INSTALL, hook_install_label(self.state))
         win32gui.AppendMenu(
             menu,
             win32con.MF_STRING,

@@ -27,7 +27,8 @@
         "IDLE", "BLOB", "WANDER", "TYPING", "PUT_AWAY_LAPTOP", "KICK_LAPTOP", "CLIMB", "PERCH_CLAUDE",
         "DRAGGED", "FALLING", "THROWN", "LAND_SQUISH", "DIZZY", "CHASE_CURSOR", "POUNCE", "POKED",
         "PETTED", "FLAIL", "YAWN", "SLEEP", "WAKE_STARTLE", "PEEK_EDGE", "CELEBRATE", "ERROR_SWEAT",
-        "ALERT", "PUSH_WINDOW", "WORK_GLANCE"
+        "ALERT", "PUSH_WINDOW", "WORK_GLANCE", "WORK_STRETCH", "WORK_THINK", "WORK_SIP", "JUGGLE",
+        "MOLT", "CONFUSED", "SAD"
       ]
     },
     "span": {
@@ -120,10 +121,10 @@
       "type": "object",
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "state": {"enum": ["WORK_GLANCE"]},
+        "state": {"enum": ["WORK_STRETCH", "WORK_THINK", "WORK_SIP", "WORK_GLANCE"]},
         "weight": {"$ref": "#/$defs/weight"},
         "when": {"$ref": "#/$defs/when"},
-        "duration_s": {"$ref": "#/$defs/duration"},
+        "duration_s": {"$ref": "#/$defs/duration", "description": "Break length in seconds (default: settings.work.break_s). One-shot strips (stretch 1.5 s, sip 2 s) hold their last frame."},
         "cooldown_s": {"type": "number", "minimum": 0},
         "enabled": {"type": "boolean", "default": true},
         "description": {"type": "string"}
@@ -165,7 +166,7 @@
         "idle_level2_after_s": {"type": "number", "minimum": 0, "description": "User idle seconds before idle level 2."},
         "fidget_interval_s": {"$ref": "#/$defs/span"},
         "mail_away_s": {"type": "number", "minimum": 0},
-        "alert_escalate_s": {"type": "number", "minimum": 0},
+        "alert_escalate_s": {"type": "number", "minimum": 0, "description": "Seconds an unanswered '!' waits before Clawd starts waving (2 s wave, 4 s '!', repeating)."},
         "work": {
           "type": "object",
           "properties": {
@@ -181,7 +182,8 @@
             },
             "break_s": {"$ref": "#/$defs/span"},
             "heuristic_max_s": {"type": "number", "minimum": 1, "description": "Longest typing run driven only by the Claude Desktop I/O heuristic."},
-            "heuristic_cooldown_s": {"type": "number", "minimum": 0}
+            "heuristic_cooldown_s": {"type": "number", "minimum": 0},
+            "juggle_segment_s": {"$ref": "#/$defs/span", "description": "While subagents run, typing and juggling alternate in turns of this length (seconds)."}
           },
           "additionalProperties": false
         }

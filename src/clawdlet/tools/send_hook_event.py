@@ -3,6 +3,7 @@
 Usage:
     python -m clawdlet.tools.send_hook_event Stop
     python -m clawdlet.tools.send_hook_event Notification --session demo --port 47821
+    python -m clawdlet.tools.send_hook_event Notification --notification-type idle_prompt
 """
 
 from __future__ import annotations
@@ -16,9 +17,18 @@ import urllib.request
 from clawdlet.agent_events import DEFAULT_HOOK_PORT, HOOK_EVENT_MAP, HOOK_PATH, read_token
 
 
-def send_hook_event(event_name: str, port: int, token: str, session_id: str) -> int:
+def send_hook_event(
+    event_name: str,
+    port: int,
+    token: str,
+    session_id: str,
+    notification_type: str | None = None,
+) -> int:
     """POST one hook payload; return the HTTP status code."""
-    body = json.dumps({"hook_event_name": event_name, "session_id": session_id}).encode()
+    payload = {"hook_event_name": event_name, "session_id": session_id}
+    if notification_type:
+        payload["notification_type"] = notification_type
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{HOOK_PATH}",
         data=body,
@@ -37,6 +47,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("event", choices=sorted(HOOK_EVENT_MAP), help="hook_event_name to send")
     parser.add_argument("--port", type=int, default=DEFAULT_HOOK_PORT)
     parser.add_argument("--session", default="clawdlet-dev")
+    parser.add_argument(
+        "--notification-type",
+        default=None,
+        help="notification_type for Notification events (e.g. permission_prompt, idle_prompt)",
+    )
     args = parser.parse_args(argv)
 
     token = read_token()
@@ -44,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         print("No hook token yet: start Clawdlet once so it creates one.", file=sys.stderr)
         return 1
     try:
-        status = send_hook_event(args.event, args.port, token, args.session)
+        status = send_hook_event(args.event, args.port, token, args.session, args.notification_type)
     except OSError as exc:
         print(f"Could not reach Clawdlet on port {args.port}: {exc}", file=sys.stderr)
         return 1

@@ -381,12 +381,25 @@ def test_zero_total_weight_falls_back_to_legacy_rest() -> None:
 
 def test_disabled_work_break_falls_back_to_glance() -> None:
     raw = json.loads(paths.default_behaviors_path().read_text(encoding="utf-8"))
-    raw["work_breaks"][0]["enabled"] = False
+    for row in raw["work_breaks"]:
+        row["enabled"] = False
     ctrl = _floor_ctrl(build_behavior_table(raw))
     before = ctrl._rng.getstate()
     assert ctrl._pick_work_break() == PetState.WORK_GLANCE
-    assert _floor_ctrl()._pick_work_break() == PetState.WORK_GLANCE
     assert ctrl._rng.getstate() == before
+
+
+def test_work_breaks_are_weighted_with_cooldowns_off_the_fsm_rng() -> None:
+    ctrl = _floor_ctrl()
+    before = ctrl._rng.getstate()
+    picked = [ctrl._pick_work_break() for _ in range(40)]  # All at the same clock time
+    assert ctrl._rng.getstate() == before
+    # stretch (60 s) and sip (90 s) cool down after one go; think / glance repeat
+    assert picked.count(PetState.WORK_STRETCH) == 1 and picked.count(PetState.WORK_SIP) == 1
+    assert {PetState.WORK_THINK, PetState.WORK_GLANCE} <= set(picked)
+    ctrl._clock += 91.0
+    later = [ctrl._pick_work_break() for _ in range(40)]
+    assert PetState.WORK_STRETCH in later and PetState.WORK_SIP in later
 
 
 def test_chain_add_adds_next_rows_to_the_pool() -> None:

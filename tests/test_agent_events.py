@@ -41,7 +41,9 @@ TOKEN = "test-token-not-secret"
         ("UserPromptSubmit", AgentEvent.BUSY),
         ("PreToolUse", AgentEvent.BUSY),
         ("PostToolUse", AgentEvent.BUSY),
-        ("SubagentStart", AgentEvent.BUSY),
+        ("SubagentStart", AgentEvent.SUBAGENT_START),
+        ("SubagentStop", AgentEvent.SUBAGENT_STOP),
+        ("PreCompact", AgentEvent.COMPACT),
         ("PostToolUseFailure", AgentEvent.ERROR),
         ("Notification", AgentEvent.ATTENTION),
         ("PermissionRequest", AgentEvent.ATTENTION),
@@ -55,7 +57,7 @@ def test_map_hook_payload_known_events(name: str, event: AgentEvent) -> None:
 
 
 def test_map_hook_payload_rejects_unknown_and_malformed() -> None:
-    assert map_hook_payload({"hook_event_name": "PreCompact"}) is None
+    assert map_hook_payload({"hook_event_name": "SessionStart"}) is None
     assert map_hook_payload({"hook_event_name": 42}) is None
     assert map_hook_payload(["Stop"]) is None
     assert map_hook_payload({"hook_event_name": "Stop"}) == (AgentEvent.DONE, "default")
@@ -139,7 +141,34 @@ def test_hook_settings_snippet_shape() -> None:
         "headers": {"Authorization": f"Bearer {TOKEN}"},
     }
     assert settings["PreToolUse"][0]["matcher"] == "*"
-    assert "matcher" not in settings["Stop"][0]
+    for name in ("Stop", "SubagentStart", "SubagentStop", "PreCompact"):
+        assert "matcher" not in settings[name][0], name
+    assert {"SubagentStop", "PreCompact"} <= set(settings)
+
+
+def test_agent_activity_counts_subagents_per_session() -> None:
+    act = AgentActivity(busy_expiry_s=90.0)
+    act.note(AgentEvent.BUSY, "a", 0.0)
+    act.note(AgentEvent.SUBAGENT_START, "a", 1.0)
+    act.note(AgentEvent.SUBAGENT_START, "a", 2.0)
+    act.note(AgentEvent.SUBAGENT_START, "b", 3.0)  # Counts as busy on its own
+    assert act.busy(3.0) and act.subagents(3.0) == 3
+    act.note(AgentEvent.SUBAGENT_STOP, "a", 4.0)
+    assert act.subagents(4.0) == 2
+    for _ in range(3):  # Never below zero
+        act.note(AgentEvent.SUBAGENT_STOP, "b", 5.0)
+    assert act.sessions["b"].subagents == 0 and act.subagents(5.0) == 1
+    act.note(AgentEvent.WAITING, "a", 6.0)  # Waiting on the user: its subagents do not count
+    assert act.subagents(6.0) == 0
+    act.note(AgentEvent.BUSY, "a", 7.0)
+    assert act.subagents(7.0) == 1
+    for event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END, AgentEvent.INTERRUPTED):
+        act.note(AgentEvent.SUBAGENT_START, "c", 8.0)
+        act.note(event, "c", 8.5)
+        assert "c" not in act.sessions, event
+        act.note(AgentEvent.SUBAGENT_STOP, "c", 9.0)  # Late stop after the turn: no phantom session
+        assert "c" not in act.sessions, event
+    assert act.subagents(7.0 + 91.0) == 0  # Expired with its session
 
 
 def test_token_is_created_once_and_reused(tmp_path: Path) -> None:
@@ -185,7 +214,7 @@ def test_server_accepts_authorized_event(server) -> None:
 
 def test_server_ignores_unknown_events_with_200(server) -> None:
     srv, events = server
-    assert _post(srv.port, b'{"hook_event_name": "PreCompact"}') == 200
+    assert _post(srv.port, b'{"hook_event_name": "SessionStart"}') == 200
     body = b'{"hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "x"}'
     assert _post(srv.port, body) == 200
     assert events.empty()
@@ -239,6 +268,23 @@ def test_send_hook_event_tool_round_trip(server) -> None:
     assert send_hook_event("Notification", srv.port, TOKEN, "dev") == 200
     assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev", "hook")
     assert send_hook_event("Stop", srv.port, "bad", "dev") == 401
+
+
+def test_send_hook_event_tool_notification_type(server, monkeypatch) -> None:
+    from clawdlet.tools import send_hook_event as tool
+
+    srv, events = server
+    monkeypatch.setattr(tool, "read_token", lambda: TOKEN)
+    argv = ["Notification", "--port", str(srv.port), "--session", "cli", "--notification-type", "auth_success"]
+    assert tool.main(argv) == 0
+    assert tool.main(["SubagentStop", "--port", str(srv.port), "--session", "cli"]) == 0
+    assert events.get(timeout=2) == (AgentEvent.SUBAGENT_STOP, "cli", "hook")  # auth_success: dropped
+    assert send_hook_event("Notification", srv.port, TOKEN, "dev", notification_type="idle_prompt") == 200
+    assert send_hook_event("Notification", srv.port, TOKEN, "dev", "permission_prompt") == 200
+    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev", "hook")  # idle_prompt was dropped
+    assert events.empty()
+    assert send_hook_event("PreCompact", srv.port, TOKEN, "dev") == 200
+    assert events.get(timeout=2) == (AgentEvent.COMPACT, "dev", "hook")
 
 
 # --- Controller reactions --------------------------------------------------------------------------
@@ -299,7 +345,12 @@ def test_tool_failure_sweats_then_resumes_typing() -> None:
     ctrl = _floor()
     ctrl.handle_agent_event(AgentEvent.BUSY, "s")
     _run(ctrl, 0.3)
-    ctrl.handle_agent_event(AgentEvent.ERROR, "s")
+    ctrl.handle_agent_event(AgentEvent.ERROR, "s")  # First failure in a streak: puzzled
+    states = _run(ctrl, ClawdletController.CONFUSED_DURATION_S + 0.3)
+    assert states[0] == PetState.CONFUSED
+    assert states.count(PetState.CONFUSED) == pytest.approx(ClawdletController.CONFUSED_DURATION_S / DT, abs=2)
+    assert states[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.ERROR, "s")  # Second: nervous sweat
     states = _run(ctrl, ClawdletController.ERROR_SWEAT_DURATION_S + 0.3)
     assert states[0] == PetState.ERROR_SWEAT
     assert states.count(PetState.ERROR_SWEAT) == pytest.approx(ClawdletController.ERROR_SWEAT_DURATION_S / DT, abs=2)
@@ -421,8 +472,11 @@ def test_transcript_waiting_winds_typing_down_without_celebrating() -> None:
     assert PetState.CELEBRATE not in _run(ctrl, 2.0)
 
 
-def test_compact_events_are_ignored_for_now() -> None:
+def test_compact_from_a_hook_session_ignores_the_transcript_copy() -> None:
     ctrl = _floor()
-    ctrl.handle_agent_event(AgentEvent.COMPACT, "t", "transcript")
+    ctrl.handle_agent_event(AgentEvent.BUSY, "h", "hook")
+    ctrl.handle_agent_event(AgentEvent.COMPACT, "h", "transcript")  # PreCompact covers hook sessions
     assert ctrl.state == PetState.IDLE
-    assert ctrl.agent.sessions == {}
+    ctrl.handle_agent_event(AgentEvent.COMPACT, "t", "transcript")  # Hook-less session: molt
+    assert ctrl.state == PetState.MOLT
+    assert "t" not in ctrl.agent.sessions  # Compacting alone does not make a session busy
