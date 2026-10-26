@@ -16,8 +16,14 @@ from clawdlet.tools.gen_sprites import generate_all_sprites
 from clawdlet.window_tracker import Win32ClaudeTracker
 
 
-# Intentional jumps: typing hoists the laptop overhead (2..4), kick hops on the follow-through (4)
-DESIGNED_AIRBORNE_FRAMES = {"typing_laptop": (2, 3, 4), "kick_laptop": (4,)}
+# Intentional jumps: typing hoists the laptop overhead (2..4), kick hops on the follow-through (4),
+# alert_wave hops (2..3); molt_shell dithers away (4..5) so its last frames may lose the ground row
+DESIGNED_AIRBORNE_FRAMES = {
+    "typing_laptop": (2, 3, 4),
+    "kick_laptop": (4,),
+    "alert_wave": (2, 3),
+    "molt_shell": (4, 5),
+}
 
 
 # Milestone 5 interaction animations; every one of them is drawn standing on the ground row
@@ -37,6 +43,37 @@ M5_EXPECTED_FRAMES = {
     "alert": 4,
     "push_window": 6,
 }
+
+
+# Milestone 6: work breaks, juggle, molt, alert escalation, idle tiers, perch variants, mail, goodbye
+M6_EXPECTED_FRAMES = {
+    "typing_loop": 8,
+    "work_glance": 4,
+    "work_stretch": 6,
+    "work_think": 6,
+    "work_sip": 8,
+    "juggle": 8,
+    "molt": 8,
+    "molt_shell": 6,
+    "alert_wave": 6,
+    "alert_tap": 4,
+    "confused": 6,
+    "sad": 6,
+    "read_scroll": 8,
+    "polish_claw": 6,
+    "dig_sand": 6,
+    "perch_dangle": 6,
+    "perch_peer": 6,
+    "wall_scratch": 6,
+    "wave_goodbye": 6,
+    "walk_mail": 8,
+    "hold_mail": 4,
+    "give_mail": 4,
+    "listen_tilt": 4,
+}
+
+# Break sprites that must share the typing loop's desk layout (no jump when switching)
+M6_DESK_SPRITES = ("work_glance", "work_stretch", "work_think", "work_sip", "juggle")
 
 
 def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> None:
@@ -59,6 +96,7 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
         "land_squish": 4,
         "dizzy": 6,
         **M5_EXPECTED_FRAMES,
+        **M6_EXPECTED_FRAMES,
     }
     for anim_name, frame_count in expected_frames.items():
         strip_path = tmp_path / f"{anim_name}.png"
@@ -79,6 +117,7 @@ def test_sprite_generator_creates_all_m1_and_m2_animations(tmp_path: Path) -> No
         "land_squish",
         "dizzy",
         *M5_EXPECTED_FRAMES,
+        *M6_EXPECTED_FRAMES,
     ):
         strip_path = tmp_path / f"{grounded_anim}.png"
         with Image.open(strip_path) as img:
@@ -222,3 +261,64 @@ def test_polished_sprites_match_concept_doc_poses(tmp_path: Path) -> None:
         _, eye_row, _, _ = _color_bbox(typing[idx], EYE_RGB)
         row = [x for x in range(64) if typing[idx].getpixel((x, eye_row)) == (*BODY_RGB, 255)]
         assert min(row) == expected_left
+
+
+def _opaque_count(frame: Image.Image, y: int) -> int:
+    return sum(1 for x in range(64) if frame.getpixel((x, y))[3] >= 128)
+
+
+def test_m6_sprites_layout_and_perch_contacts(tmp_path: Path) -> None:
+    import json
+
+    generate_all_sprites(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["animations"]
+    for name, count in M6_EXPECTED_FRAMES.items():
+        assert manifest[name]["frames"] == count
+    assert manifest["read_scroll"]["loop"] is True and manifest["read_scroll"]["loop_start"] == 3
+    assert manifest["molt"]["loop"] is False and manifest["molt_shell"]["loop"] is False
+    assert manifest["typing_loop"]["fps"] == manifest["typing_laptop"]["fps"]
+
+    # typing_loop is exactly the looping tail (frames 11..18) of typing_laptop
+    typing = _frames(tmp_path, "typing_laptop")
+    loop = _frames(tmp_path, "typing_loop")
+    assert [f.tobytes() for f in loop] == [f.tobytes() for f in typing[11:19]]
+
+    # Work breaks keep the open laptop and Clawd's legs exactly where the typing loop has them
+    laptop_box = (0, 48, 10, 64)
+    legs_box = (36, 56, 64, 64)
+    ref_laptop = loop[0].crop(laptop_box).tobytes()
+    ref_legs = loop[0].crop(legs_box).tobytes()
+    for name in M6_DESK_SPRITES:
+        for idx, frame in enumerate(_frames(tmp_path, name)):
+            assert frame.crop(laptop_box).tobytes() == ref_laptop, f"{name} frame {idx} laptop moved"
+            assert frame.crop(legs_box).tobytes() == ref_legs, f"{name} frame {idx} Clawd moved"
+
+    # alert_wave really leaves the ground on its hop frames
+    wave = _frames(tmp_path, "alert_wave")
+    for idx in DESIGNED_AIRBORNE_FRAMES["alert_wave"]:
+        assert _opaque_count(wave[idx], 63) == 0
+
+    # molt_shell is a ground prop that fades out by dithering
+    shell = _frames(tmp_path, "molt_shell")
+    opaque_px = [frame.getchannel("A").histogram()[255] for frame in shell]
+    assert opaque_px[0] == opaque_px[3]
+    assert opaque_px[3] > opaque_px[4] > opaque_px[5] > 0
+    assert all(color[:3] != EYE_RGB for _, color in shell[0].getcolors(4096))
+
+    # perch_dangle: the seat (body bottom) sits on pixel row 55, legs dangle below it to row 63
+    for idx, frame in enumerate(_frames(tmp_path, "perch_dangle")):
+        seat = _opaque_count(frame, 55)
+        assert seat >= 32, f"perch_dangle frame {idx} has no seat at row 55"
+        assert _opaque_count(frame, 56) < seat // 2
+        assert _opaque_runs(frame, 56) >= 2
+        assert _opaque_count(frame, 63) > 0
+        assert _color_bbox(frame, BODY_RGB)[3] == 63
+
+    # perch_peer: belly contact line on pixel row 53, eyes peer down below the bar
+    for idx, frame in enumerate(_frames(tmp_path, "perch_peer")):
+        belly = _opaque_count(frame, 53)
+        assert belly >= 40 and _opaque_runs(frame, 53) == 1, f"perch_peer frame {idx} belly line"
+        assert _opaque_count(frame, 54) < belly
+        _, eye_top, _, _ = _color_bbox(frame, EYE_RGB)
+        assert eye_top > 53
+        assert _opaque_count(frame, 63) > 0

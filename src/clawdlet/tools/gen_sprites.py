@@ -35,6 +35,24 @@ SWEAT_BLUE = (120, 196, 255, 255)     # Error sweat drop
 ZZZ_WHITE = (232, 238, 255, 255)      # Sleeping Zzz letters
 ANGER_RED = (214, 34, 40, 255)        # Flail anger vein mark
 
+# Milestone 6 palette: work-break props, molting, scroll, sand and mail
+MUG_CREAM = (247, 240, 226, 255)      # Coffee mug glaze
+MUG_SHADE = (204, 190, 168, 255)      # Mug base shadow & handle
+COFFEE_BROWN = (112, 68, 44, 255)     # Coffee surface at the mug rim
+STEAM_WHITE = (226, 232, 242, 255)    # Rising coffee steam wisps
+SHELL_TAN = (172, 126, 112, 255)      # Desaturated, darker molted exoskeleton
+SHELL_DARK = (118, 86, 78, 255)       # Shed shell inner shadow
+CRACK_DARK = (112, 36, 26, 255)       # Crack lines splitting the old shell
+TERRACOTTA_FRESH = (255, 122, 98, 255)  # Slightly brighter freshly-molted body
+PARCHMENT = (244, 228, 186, 255)      # Scroll paper
+SCROLL_BROWN = (146, 94, 52, 255)     # Scroll wooden rollers
+SCROLL_INK = (178, 142, 98, 255)      # Faint scribbled lines on the scroll
+SAND = (232, 196, 124, 255)           # Flying sand grains
+SAND_DARK = (196, 156, 90, 255)       # Sand mound shading
+ENVELOPE_CREAM = (250, 245, 232, 255)  # Mail envelope paper
+ENVELOPE_FOLD = (196, 184, 162, 255)  # Envelope flap fold lines
+SEAL_RED = (198, 52, 38, 255)         # Terracotta-red wax seal
+
 # 32x32 grid scaled 2x -> 64x64 base sprite.
 # In docs/clawd.png, Clawd is an exact 12-unit wide x 8-unit tall geometric figure.
 # Here 1 Clawd unit = 2x2 grid cells (4x4 px), giving exact proportions plus half-unit animation steps!
@@ -70,6 +88,41 @@ def _px(
         grid[y][x] = color
 
 
+def _draw_eye_pair(
+    grid: list[list[tuple[int, int, int, int]]],
+    ex_left: int,
+    ex_right: int,
+    ey: int,
+    eye_mode: str,
+) -> None:
+    """Draw Clawd's two 2x2 eyes (top-left corners at (ex_left, ey) and (ex_right, ey)) in a given mood."""
+    if eye_mode == "blink":
+        _rect(grid, ex_left, ey + 1, 2, 1, EYE_COLOR)
+        _rect(grid, ex_right, ey + 1, 2, 1, EYE_COLOR)
+    elif eye_mode == "squint":
+        _rect(grid, ex_left, ey, 2, 1, EYE_COLOR)
+        _rect(grid, ex_right, ey, 2, 1, EYE_COLOR)
+    elif eye_mode == "dizzy_a":
+        _px(grid, ex_left, ey, EYE_COLOR)
+        _px(grid, ex_left + 1, ey + 1, EYE_COLOR)
+        _px(grid, ex_right + 1, ey, EYE_COLOR)
+        _px(grid, ex_right, ey + 1, EYE_COLOR)
+    elif eye_mode == "dizzy_b":
+        _px(grid, ex_left + 1, ey, EYE_COLOR)
+        _px(grid, ex_left, ey + 1, EYE_COLOR)
+        _px(grid, ex_right, ey, EYE_COLOR)
+        _px(grid, ex_right + 1, ey + 1, EYE_COLOR)
+    elif eye_mode == "sad":
+        # Droopy eyes: the outer top corners are missing so the lids slope down and away
+        _px(grid, ex_left + 1, ey, EYE_COLOR)
+        _rect(grid, ex_left, ey + 1, 2, 1, EYE_COLOR)
+        _px(grid, ex_right, ey, EYE_COLOR)
+        _rect(grid, ex_right, ey + 1, 2, 1, EYE_COLOR)
+    else:
+        _rect(grid, ex_left, ey, 2, 2, EYE_COLOR)
+        _rect(grid, ex_right, ey, 2, 2, EYE_COLOR)
+
+
 def _draw_canonical_clawd(
     grid: list[list[tuple[int, int, int, int]]],
     body_left: int = 8,
@@ -88,6 +141,7 @@ def _draw_canonical_clawd(
     eye_mode: str = "normal",
     eye_dx: int = 0,
     eye_dy: int = 0,
+    body_color: tuple[int, int, int, int] = TERRACOTTA,
 ) -> None:
     """Draw Clawd with the exact 12x8 unit geometry from docs/clawd.png (1 unit = 2 cells)."""
     b_bottom = body_top + body_height
@@ -103,7 +157,7 @@ def _draw_canonical_clawd(
     if leg_tops is None:
         leg_tops = (b_bottom, b_bottom, b_bottom, b_bottom)
     if leg_colors is None:
-        leg_colors = (TERRACOTTA, TERRACOTTA, TERRACOTTA, TERRACOTTA)
+        leg_colors = (body_color, body_color, body_color, body_color)
 
     for idx in range(4):
         lx = leg_xs[idx]
@@ -113,37 +167,18 @@ def _draw_canonical_clawd(
             _rect(grid, lx, ly0, leg_w, ly1 - ly0 + 1, leg_colors[idx])
 
     # 2. Main coral-orange rectangular torso
-    _rect(grid, body_left, body_top, body_width, body_height, TERRACOTTA)
+    _rect(grid, body_left, body_top, body_width, body_height, body_color)
 
     # 3. Chunky 2u x 2u (4x4 cell) side arms
     if arm_w > 0 and arm_h > 0:
-        _rect(grid, body_left - arm_w, body_top + left_arm_dy, arm_w, arm_h, TERRACOTTA)
-        _rect(grid, body_left + body_width, body_top + right_arm_dy, arm_w, arm_h, TERRACOTTA)
+        _rect(grid, body_left - arm_w, body_top + left_arm_dy, arm_w, arm_h, body_color)
+        _rect(grid, body_left + body_width, body_top + right_arm_dy, arm_w, arm_h, body_color)
 
     # 4. Authentic 2x2 square black eyes
     ex_left = body_left + 2 + eye_dx
     ex_right = body_left + body_width - 4 + eye_dx
     ey = body_top + 2 + eye_dy
-
-    if eye_mode == "blink":
-        _rect(grid, ex_left, ey + 1, 2, 1, EYE_COLOR)
-        _rect(grid, ex_right, ey + 1, 2, 1, EYE_COLOR)
-    elif eye_mode == "squint":
-        _rect(grid, ex_left, ey, 2, 1, EYE_COLOR)
-        _rect(grid, ex_right, ey, 2, 1, EYE_COLOR)
-    elif eye_mode == "dizzy_a":
-        _px(grid, ex_left, ey, EYE_COLOR)
-        _px(grid, ex_left + 1, ey + 1, EYE_COLOR)
-        _px(grid, ex_right + 1, ey, EYE_COLOR)
-        _px(grid, ex_right, ey + 1, EYE_COLOR)
-    elif eye_mode == "dizzy_b":
-        _px(grid, ex_left + 1, ey, EYE_COLOR)
-        _px(grid, ex_left, ey + 1, EYE_COLOR)
-        _px(grid, ex_right, ey, EYE_COLOR)
-        _px(grid, ex_right + 1, ey + 1, EYE_COLOR)
-    else:
-        _rect(grid, ex_left, ey, 2, 2, EYE_COLOR)
-        _rect(grid, ex_right, ey, 2, 2, EYE_COLOR)
+    _draw_eye_pair(grid, ex_left, ex_right, ey, eye_mode)
 
 
 def _grid_to_image(grid: list[list[tuple[int, int, int, int]]]) -> Image.Image:
@@ -230,32 +265,36 @@ def _build_idle_blob() -> list[Image.Image]:
     return frames
 
 
+_WALK_MAIN = TERRACOTTA
+_WALK_BACK = TERRACOTTA_DARK
+# Shared trot cycle (walk_horizontal, walk_mail).
+# Pair A = legs 0 & 2 (x=8, 18), Pair B = legs 1 & 3 (x=12, 22)
+# Lifted legs reach y=30 (3 cells tall) while grounded legs reach y=31 (4 cells tall)
+# (body_top, leg_xs, leg_bottoms, leg_colors, left_arm_dy, right_arm_dy)
+_WALK_SPECS = (
+    # 0: Pair A steps forward (x=9, 19), Pair B pushes back (x=11, 21, lifted 1 cell)
+    (16, (9, 11, 19, 21), (31, 30, 31, 30), (_WALK_MAIN, _WALK_BACK, _WALK_MAIN, _WALK_BACK), 3, 5),
+    # 1: Pair A full stride (x=9, 19), Pair B swinging forward (x=12, 22, lifted 1 cell)
+    (16, (9, 12, 19, 22), (31, 30, 31, 30), (_WALK_MAIN, _WALK_BACK, _WALK_MAIN, _WALK_BACK), 3, 5),
+    # 2: Passing contact dip (body dips 1 cell to y=17, all 4 legs grounded)
+    (17, (8, 12, 18, 22), (31, 31, 31, 31), (_WALK_MAIN, _WALK_BACK, _WALK_MAIN, _WALK_BACK), 4, 4),
+    # 3: Push-off rise
+    (16, (8, 13, 18, 23), (30, 31, 30, 31), (_WALK_BACK, _WALK_MAIN, _WALK_BACK, _WALK_MAIN), 5, 3),
+    # 4: Pair B steps forward (x=13, 23), Pair A swings forward (x=8, 18, lifted 1 cell)
+    (16, (7, 13, 17, 23), (30, 31, 30, 31), (_WALK_BACK, _WALK_MAIN, _WALK_BACK, _WALK_MAIN), 5, 3),
+    # 5: Pair B full stride, Pair A swinging through
+    (16, (8, 12, 18, 22), (30, 31, 30, 31), (_WALK_BACK, _WALK_MAIN, _WALK_BACK, _WALK_MAIN), 5, 3),
+    # 6: Passing contact dip (body dips 1 cell to y=17, all 4 legs grounded)
+    (17, (8, 12, 18, 22), (31, 31, 31, 31), (_WALK_BACK, _WALK_MAIN, _WALK_BACK, _WALK_MAIN), 4, 4),
+    # 7: Push-off recovery
+    (16, (9, 12, 19, 22), (31, 30, 31, 30), (_WALK_MAIN, _WALK_BACK, _WALK_MAIN, _WALK_BACK), 3, 5),
+)
+
+
 def _build_walk_horizontal() -> list[Image.Image]:
     """8-frame smooth trot walk cycle: legs swing horizontally & lift 1 cell (never stubby!) + arm swing."""
     frames: list[Image.Image] = []
-    c_main = TERRACOTTA
-    c_back = TERRACOTTA_DARK
-    # Pair A = legs 0 & 2 (x=8, 18), Pair B = legs 1 & 3 (x=12, 22)
-    # Lifted legs reach y=30 (3 cells tall) while grounded legs reach y=31 (4 cells tall)
-    specs = [
-        # 0: Pair A steps forward (x=9, 19), Pair B pushes back (x=11, 21, lifted 1 cell)
-        (16, (9, 11, 19, 21), (31, 30, 31, 30), (c_main, c_back, c_main, c_back), 3, 5),
-        # 1: Pair A full stride (x=9, 19), Pair B swinging forward (x=12, 22, lifted 1 cell)
-        (16, (9, 12, 19, 22), (31, 30, 31, 30), (c_main, c_back, c_main, c_back), 3, 5),
-        # 2: Passing contact dip (body dips 1 cell to y=17, all 4 legs grounded)
-        (17, (8, 12, 18, 22), (31, 31, 31, 31), (c_main, c_back, c_main, c_back), 4, 4),
-        # 3: Push-off rise
-        (16, (8, 13, 18, 23), (30, 31, 30, 31), (c_back, c_main, c_back, c_main), 5, 3),
-        # 4: Pair B steps forward (x=13, 23), Pair A swings forward (x=8, 18, lifted 1 cell)
-        (16, (7, 13, 17, 23), (30, 31, 30, 31), (c_back, c_main, c_back, c_main), 5, 3),
-        # 5: Pair B full stride, Pair A swinging through
-        (16, (8, 12, 18, 22), (30, 31, 30, 31), (c_back, c_main, c_back, c_main), 5, 3),
-        # 6: Passing contact dip (body dips 1 cell to y=17, all 4 legs grounded)
-        (17, (8, 12, 18, 22), (31, 31, 31, 31), (c_back, c_main, c_back, c_main), 4, 4),
-        # 7: Push-off recovery
-        (16, (9, 12, 19, 22), (31, 30, 31, 30), (c_main, c_back, c_main, c_back), 3, 5),
-    ]
-    for b_top, l_xs, l_bots, l_cols, l_arm, r_arm in specs:
+    for b_top, l_xs, l_bots, l_cols, l_arm, r_arm in _WALK_SPECS:
         g = _new_grid()
         _draw_canonical_clawd(
             g,
@@ -340,6 +379,8 @@ def _draw_right_clawd_32(
     right_arm_w: int = 2,
     right_arm_dy: int = 4,
     leg_bottom: int = 31,
+    eye_dx: int = 0,
+    eye_dy: int = 0,
 ) -> None:
     """Draw docs/clawd.png standing on the right side (x=15..29) facing left with authentic eye spacing."""
     b_bottom = body_top + body_height
@@ -369,18 +410,10 @@ def _draw_right_clawd_32(
         )
 
     # Left-facing 2x2 square black eyes with wide authentic spacing (gap = 6 cells!)
-    ex_left = body_left + 2
-    ex_right = body_left + 10
-    ey = body_top + 2
-    if eye_mode == "blink":
-        _rect(grid, ex_left, ey + 1, 2, 1, EYE_COLOR)
-        _rect(grid, ex_right, ey + 1, 2, 1, EYE_COLOR)
-    elif eye_mode == "squint":
-        _rect(grid, ex_left, ey, 2, 1, EYE_COLOR)
-        _rect(grid, ex_right, ey, 2, 1, EYE_COLOR)
-    else:
-        _rect(grid, ex_left, ey, 2, 2, EYE_COLOR)
-        _rect(grid, ex_right, ey, 2, 2, EYE_COLOR)
+    ex_left = body_left + 2 + eye_dx
+    ex_right = body_left + 10 + eye_dx
+    ey = body_top + 2 + eye_dy
+    _draw_eye_pair(grid, ex_left, ex_right, ey, eye_mode)
 
 
 def _draw_long_typing_arm(
@@ -1651,6 +1684,843 @@ def _build_push_window() -> list[Image.Image]:
     return frames
 
 
+# --- Milestone 6 sprites: work breaks, juggle, molt, alert escalation, idle tiers, mail ------------
+
+Grid = list[list[tuple[int, int, int, int]]]
+
+# Work-station layout shared with the typing loop (typing_laptop frames 11..18)
+DESK_BODY_LEFT = 15
+DESK_BODY_WIDTH = 15
+
+
+def _draw_question(grid: Grid, x: int, y: int, color: tuple[int, int, int, int] = STAR_GOLD) -> None:
+    """5x7 chunky '?' glyph (2-cell strokes like _draw_bang) with its top-left corner at (x, y)."""
+    rows = (
+        ".XXX.",
+        "XX.XX",
+        "...XX",
+        "..XX.",
+        "..XX.",
+        ".....",
+        "..XX.",
+    )
+    for dy, row in enumerate(rows):
+        for dx, ch in enumerate(row):
+            if ch == "X":
+                _px(grid, x + dx, y + dy, color)
+
+
+def _draw_sparkle(grid: Grid, x: int, y: int, big: bool = False) -> None:
+    """Tiny 4-point golden twinkle centred on (x, y)."""
+    _px(grid, x, y, ZZZ_WHITE if big else STAR_GOLD)
+    reach = 2 if big else 1
+    for i in range(1, reach + 1):
+        for dx, dy in ((i, 0), (-i, 0), (0, i), (0, -i)):
+            _px(grid, x + dx, y + dy, STAR_GOLD)
+
+
+def _draw_mug(grid: Grid, x: int, y: int, steam_phase: int | None = None) -> None:
+    """3x4 cream coffee mug (handle on the right) with optional 3-pixel wavy steam above it."""
+    _rect(grid, x, y, 3, 4, MUG_CREAM)
+    _px(grid, x + 1, y, COFFEE_BROWN)
+    _rect(grid, x, y + 3, 3, 1, MUG_SHADE)
+    _rect(grid, x + 3, y + 1, 1, 2, MUG_SHADE)
+    if steam_phase is not None:
+        wave = (0, 1, 0) if steam_phase % 2 == 0 else (1, 0, 1)
+        for i, wx in enumerate(wave):
+            _px(grid, x + wx, y - 2 - i, STEAM_WHITE)
+
+
+def _draw_envelope(grid: Grid, x: int, y: int, w: int = 10, h: int = 7) -> None:
+    """Cream envelope with a 'V' flap fold and a terracotta-red wax seal at the flap tip."""
+    _rect(grid, x, y, w, h, ENVELOPE_CREAM)
+    _rect(grid, x, y + h - 1, w, 1, ENVELOPE_FOLD)
+    depth = min(w // 2, h - 2)
+    for i in range(depth):
+        _px(grid, x + i, y + i, ENVELOPE_FOLD)
+        _px(grid, x + w - 1 - i, y + i, ENVELOPE_FOLD)
+    _rect(grid, x + w // 2 - 1, y + depth - 1, 2, 2, SEAL_RED)
+
+
+def _draw_raised_claw(
+    grid: Grid,
+    x: int,
+    base_y: int,
+    top_y: int,
+    tip_dx: int = 0,
+    color: tuple[int, int, int, int] = TERRACOTTA,
+) -> None:
+    """2-cell arm column from base_y up to a chunky 4x3 claw whose top row is top_y (tip_dx waves it)."""
+    _rect(grid, x, top_y + 2, 2, base_y - top_y - 1, color)
+    _rect(grid, x - 1 + tip_dx, top_y, 4, 3, color)
+
+
+def _draw_thick_line(
+    grid: Grid,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    color: tuple[int, int, int, int],
+    thick: int = 2,
+) -> None:
+    """Stamp a thick x thick block along a straight line (for diagonal bent arms/limbs)."""
+    steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+    for i in range(steps + 1):
+        x = round(x0 + (x1 - x0) * i / steps)
+        y = round(y0 + (y1 - y0) * i / steps)
+        _rect(grid, x, y, thick, thick, color)
+
+
+def _shift_rows(grid: Grid, y0: int, y1: int, dx: int) -> None:
+    """Shift grid rows y0..y1 (inclusive) horizontally by dx cells (used for a head tilt)."""
+    for y in range(max(0, y0), min(GRID_SIZE, y1 + 1)):
+        row = grid[y]
+        new_row = [TRANSPARENT] * GRID_SIZE
+        for x in range(GRID_SIZE):
+            nx = x + dx
+            if 0 <= nx < GRID_SIZE:
+                new_row[nx] = row[x]
+        grid[y] = new_row
+
+
+def _dither_grid(grid: Grid, level: int) -> None:
+    """Checkerboard fade: level 1 drops every other cell, level 2 keeps only one cell in four."""
+    for y in range(GRID_SIZE):
+        for x in range(GRID_SIZE):
+            keep = (x + y) % 2 == 0 if level == 1 else (x % 2 == 0 and y % 2 == 0)
+            if not keep:
+                grid[y][x] = TRANSPARENT
+
+
+def _draw_desk_clawd(
+    grid: Grid,
+    body_top: int = 16,
+    eye_mode: str = "normal",
+    eye_dx: int = 0,
+    eye_dy: int = 0,
+    right_arm_dy: int = 4,
+    right_arm_w: int = 2,
+    pressed_key: int | None = None,
+) -> None:
+    """Open '\\_' laptop + Clawd standing on the right in exactly the typing-loop position (x=15..29)."""
+    _draw_side_laptop_32(grid, y_offset=0, slam_squash=0, pressed_key_group=pressed_key)
+    _draw_right_clawd_32(
+        grid,
+        body_left=DESK_BODY_LEFT,
+        body_top=body_top,
+        body_width=DESK_BODY_WIDTH,
+        body_height=28 - body_top,
+        eye_mode=eye_mode,
+        right_arm_w=right_arm_w,
+        right_arm_dy=right_arm_dy,
+        eye_dx=eye_dx,
+        eye_dy=eye_dy,
+    )
+
+
+def _draw_desk_rest_arms(grid: Grid) -> None:
+    """Both long arms resting their paws on the keyboard deck (the calm in-between typing pose)."""
+    _draw_long_typing_arm(grid, shoulder_x=15, shoulder_y=19, hand_x=5, hand_y=24, color=TERRACOTTA_DARK)
+    _draw_long_typing_arm(grid, shoulder_x=15, shoulder_y=23, hand_x=7, hand_y=27, color=TERRACOTTA)
+
+
+def _draw_desk_left_stub(grid: Grid, body_top: int, dy: int = 4) -> None:
+    """Short 2x4 left arm stub mirroring the right one, for break poses with the arms pulled in."""
+    _rect(grid, DESK_BODY_LEFT - 2, body_top + dy, 2, 4, TERRACOTTA)
+
+
+def _build_typing_loop() -> list[Image.Image]:
+    """The 8-frame typing loop on its own: exactly typing_laptop frames 11..18 (no intro)."""
+    return _build_typing_laptop()[11:19]
+
+
+def _build_work_glance() -> list[Image.Image]:
+    """4-frame break at the open laptop: paws rest on the keys while Clawd looks up at the viewer."""
+    frames: list[Image.Image] = []
+    # (body_top, eye_mode, eye_dx, eye_dy)
+    specs = [
+        (16, "normal", 0, -1),   # 0: Eyes lift off the screen up toward you
+        (15, "normal", 1, -1),   # 1: Head lifts, glance turns toward the viewer
+        (15, "blink", 1, -1),    # 2: Slow blink
+        (16, "normal", -1, 0),   # 3: Peek back down at the screen
+    ]
+    for b_top, eyes, edx, edy in specs:
+        g = _new_grid()
+        _draw_desk_clawd(g, body_top=b_top, eye_mode=eyes, eye_dx=edx, eye_dy=edy)
+        _draw_desk_rest_arms(g)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_work_stretch() -> list[Image.Image]:
+    """6-frame overhead stretch beside the open laptop, then back to the resting typing pose."""
+    frames: list[Image.Image] = []
+    # (body_top, arm reach above body or None for resting paws, claw inward lean, eye_mode)
+    specs = [
+        (16, None, 0, "normal"),   # 0: Resting paws on keys
+        (15, 4, 0, "squint"),      # 1: Arms rise, body starts to lengthen
+        (14, 7, 0, "blink"),       # 2: Arms high overhead
+        (13, 8, 1, "blink"),       # 3: Peak stretch, claws lean in toward each other
+        (15, 4, 0, "squint"),      # 4: Arms coming down
+        (16, None, 0, "normal"),   # 5: Back to the resting typing pose
+    ]
+    for b_top, reach, lean, eyes in specs:
+        g = _new_grid()
+        if reach is None:
+            _draw_desk_clawd(g, body_top=b_top, eye_mode=eyes)
+            _draw_desk_rest_arms(g)
+        else:
+            _draw_desk_clawd(g, body_top=b_top, eye_mode=eyes, right_arm_w=0)
+            top = b_top - reach
+            # Two 3-cell arm columns rising from the top corners (like the typing laptop hoist)
+            _rect(g, DESK_BODY_LEFT, top + 1, 3, reach, TERRACOTTA_DARK)
+            _rect(g, DESK_BODY_LEFT + DESK_BODY_WIDTH - 3, top + 1, 3, reach, TERRACOTTA)
+            _rect(g, DESK_BODY_LEFT - 1 + lean * 2, top - 1, 4, 2, TERRACOTTA_DARK)
+            _rect(g, DESK_BODY_LEFT + DESK_BODY_WIDTH - 3 - lean * 2, top - 1, 4, 2, TERRACOTTA)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_work_think() -> list[Image.Image]:
+    """6-frame pondering loop: chin resting on a claw, '...' dots appear one by one above the head."""
+    frames: list[Image.Image] = []
+    # (dots shown, eye_mode, eye_dx)
+    specs = [
+        (0, "normal", 1),
+        (1, "normal", 1),
+        (2, "normal", 1),
+        (3, "normal", 1),
+        (3, "normal", 0),
+        (3, "blink", 1),
+    ]
+    for dots, eyes, edx in specs:
+        g = _new_grid()
+        _draw_desk_clawd(g, eye_mode=eyes, eye_dx=edx, eye_dy=-1)
+        # Bent front arm: elbow planted low beside the body, forearm angled up, paw cupping the chin
+        _rect(g, 11, 25, 3, 3, TERRACOTTA_DARK)
+        _draw_thick_line(g, 12, 25, 16, 21, TERRACOTTA_DARK)
+        _rect(g, 15, 20, 5, 2, TERRACOTTA_DARK)
+        for i in range(dots):
+            _rect(g, 19 + i * 4, 11, 2, 2, ZZZ_WHITE)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_work_sip() -> list[Image.Image]:
+    """8-frame coffee break: lift the steaming mug from beside the laptop, sip, set it back down."""
+    frames: list[Image.Image] = []
+    # (mug_x, mug_y, paw holding, eye_mode, eye_dx, eye_dy, steam phase or None, body_top)
+    specs = [
+        (11, 28, False, "normal", -1, 1, 0, 16),  # 0: Mug steaming on the floor; glance at it
+        (11, 28, True, "normal", -1, 1, 1, 17),   # 1: Lean down and grab the handle
+        (11, 22, True, "normal", -1, 0, 0, 16),   # 2: Lift to chest height
+        (11, 18, True, "squint", 0, 0, 1, 16),    # 3: Mug up at the face
+        (12, 17, True, "blink", 0, 0, None, 15),  # 4: Sip! (tilted up, eyes closed)
+        (11, 18, True, "squint", 0, 0, 0, 16),    # 5: Ahh...
+        (11, 24, True, "normal", -1, 1, None, 16),  # 6: Lower it back down
+        (11, 28, False, "squint", -1, 1, 1, 16),  # 7: Mug back on the floor, content squint
+    ]
+    for mx, my, held, eyes, edx, edy, steam, b_top in specs:
+        g = _new_grid()
+        _draw_desk_clawd(g, body_top=b_top, eye_mode=eyes, eye_dx=edx, eye_dy=edy)
+        _draw_mug(g, mx, my, steam)
+        if held:
+            # Dark paw gripping the handle, attached to the body's left edge
+            _rect(g, mx + 3, my, 3, 3, TERRACOTTA_DARK)
+            _rect(g, mx + 5, min(my + 1, 26), 2, 3, TERRACOTTA_DARK)
+        else:
+            _draw_desk_left_stub(g, b_top, 5)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+# 2x2 ball positions (top-left) on the juggling loop above Clawd's head at the desk
+_JUGGLE_RING = ((20, 2), (25, 3), (28, 7), (26, 11), (21, 12), (16, 11), (13, 7), (15, 3))
+
+
+def _build_juggle() -> list[Image.Image]:
+    """8-frame juggling loop at the open laptop: three balls circle over the head, arms toss alternately."""
+    frames: list[Image.Image] = []
+    balls = ((0, TERRACOTTA_DARK), (3, STAR_GOLD), (5, ELECTRIC_CYAN))
+    eye_dxs = (0, 1, 1, 0, 0, -1, -1, 0)
+    for f in range(8):
+        g = _new_grid()
+        left_up = f % 2 == 0
+        _draw_desk_clawd(g, eye_dx=eye_dxs[f], eye_dy=-1, right_arm_w=0)
+        # Arms alternately toss up past the head (raised) and dip to catch (low stub)
+        if left_up:
+            _draw_raised_claw(g, DESK_BODY_LEFT - 2, 21, 11, 0)
+            _rect(g, DESK_BODY_LEFT + DESK_BODY_WIDTH, 20, 2, 4, TERRACOTTA)
+        else:
+            _rect(g, DESK_BODY_LEFT - 2, 20, 2, 4, TERRACOTTA)
+            _draw_raised_claw(g, DESK_BODY_LEFT + DESK_BODY_WIDTH, 21, 11, 0)
+        for offset, color in balls:
+            bx, by = _JUGGLE_RING[(f + offset) % len(_JUGGLE_RING)]
+            _rect(g, bx, by, 2, 2, color)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+# Crack path (relative to the canonical body's top-left) growing across the old shell
+_MOLT_CRACKS = (
+    ((8, 0), (7, 1), (8, 2)),
+    ((9, 3), (8, 4), (7, 5)),
+    ((8, 6), (9, 7), (8, 8), (7, 9), (8, 10), (8, 11), (1, 6), (2, 7), (3, 7), (14, 5), (13, 6), (14, 7)),
+)
+
+
+def _draw_shell(grid: Grid, body_left: int = 8, body_top: int = 16) -> None:
+    """Empty molted husk: hollow desaturated outline of Clawd's body, split open at the top, no eyes."""
+    bw, bh = 16, 12
+    b_bottom = body_top + bh
+    for lx in (body_left, body_left + 4, body_left + bw - 6, body_left + bw - 2):
+        _rect(grid, lx, b_bottom, 2, GRID_SIZE - b_bottom, SHELL_TAN)
+    for ax in (body_left - 4, body_left + bw):
+        _rect(grid, ax, body_top + 4, 4, 4, SHELL_TAN)
+        _rect(grid, ax + 1, body_top + 5, 2, 2, SHELL_DARK)
+    _rect(grid, body_left, body_top, bw, bh, SHELL_TAN)
+    _rect(grid, body_left + 1, body_top + 1, bw - 2, bh - 2, TRANSPARENT)
+    # Inner floor shadow gives the husk some volume
+    _rect(grid, body_left + 1, b_bottom - 3, bw - 2, 2, SHELL_DARK)
+    # Jagged split along the top where Clawd climbed out, with a crack running down the side wall
+    _rect(grid, body_left + 6, body_top, 4, 1, TRANSPARENT)
+    _px(grid, body_left + 6, body_top + 1, SHELL_TAN)
+    _px(grid, body_left + 9, body_top + 1, SHELL_TAN)
+    for cx, cy in ((0, 4), (0, 5), (0, 7)):
+        _px(grid, body_left + cx, body_top + cy, CRACK_DARK)
+    _px(grid, body_left + 1, body_top + 6, CRACK_DARK)
+
+
+def _build_molt() -> list[Image.Image]:
+    """8-frame molt: shake, cracks spread over the shell, Clawd steps out 4 cells (8 px) to the right.
+
+    The empty husk stays at the canonical position (body_left=8) from frame 4 on, exactly where
+    molt_shell draws it, so the controller can swap in molt_shell and shift the pet +8 sprite px.
+    """
+    frames: list[Image.Image] = []
+    # (body_left, body_top, crack stage, eye_mode)
+    shake_specs = [
+        (7, 16, 0, "squint"),
+        (9, 16, 1, "squint"),
+        (7, 16, 2, "blink"),
+        (8, 17, 3, "squint"),
+    ]
+    for b_left, b_top, stage, eyes in shake_specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_left=b_left, body_top=b_top, body_height=28 - b_top, eye_mode=eyes,
+            left_arm_dy=3 if stage % 2 else 5, right_arm_dy=5 if stage % 2 else 3,
+        )
+        for crack_set in _MOLT_CRACKS[:stage]:
+            for cx, cy in crack_set:
+                _px(g, b_left + cx, b_top + cy, CRACK_DARK)
+        frames.append(_grid_to_image(g))
+
+    # (fresh body_left, leg_bottoms, body color, eye_mode, sparkles)
+    out_specs = [
+        (10, (31, 31, 31, 31), TERRACOTTA_FRESH, "normal", ()),
+        (12, (31, 30, 31, 30), TERRACOTTA_FRESH, "normal", ()),
+        (12, (31, 31, 31, 31), TERRACOTTA_FRESH, "squint", ((29, 12),)),
+        (12, (31, 31, 31, 31), TERRACOTTA, "normal", ((30, 13), (26, 10))),
+    ]
+    for b_left, l_bots, color, eyes, sparkles in out_specs:
+        g = _new_grid()
+        _draw_shell(g)
+        _draw_canonical_clawd(
+            g, body_left=b_left, leg_bottoms=l_bots, eye_mode=eyes, eye_dx=1, body_color=color
+        )
+        for i, (sx, sy) in enumerate(sparkles):
+            _draw_sparkle(g, sx, sy, big=i == 0)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_molt_shell() -> list[Image.Image]:
+    """6-frame ground prop: the empty shed shell sits still, then dithers away (frames 4-5)."""
+    frames: list[Image.Image] = []
+    for f in range(6):
+        g = _new_grid()
+        _draw_shell(g)
+        if f == 2:
+            # A loose flake drops from the split lip
+            _px(g, 14, 18, SHELL_TAN)
+        elif f == 3:
+            _px(g, 14, 25, SHELL_TAN)
+        if f >= 4:
+            _dither_grid(g, f - 3)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_alert_wave() -> list[Image.Image]:
+    """6-frame escalated alert: hop with both claws waving overhead under the golden '!' (2-3 airborne)."""
+    frames: list[Image.Image] = []
+    # (body_top, body_height, leg_bottom, claw tip_dx)
+    specs = [
+        (18, 10, 31, -1),  # 0: Crouch
+        (15, 13, 31, 1),   # 1: Spring up, body stretched
+        (12, 12, 28, -1),  # 2: Airborne
+        (11, 12, 27, 1),   # 3: Peak of the hop
+        (15, 13, 31, -1),  # 4: Land
+        (17, 11, 31, 1),   # 5: Settle
+    ]
+    for b_top, b_h, leg_bot, tip in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=b_h, arm_w=0,
+            leg_bottoms=(leg_bot,) * 4, eye_dy=-1,
+        )
+        _draw_raised_claw(g, 6, b_top + 5, b_top - 6, tip)
+        _draw_raised_claw(g, 24, b_top + 5, b_top - 6, -tip)
+        _draw_bang(g, 15, b_top - 11)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_alert_tap() -> list[Image.Image]:
+    """4-frame perched alert: knock a claw down on the title bar with impact sparks under a '!'."""
+    frames: list[Image.Image] = []
+    # (body_top, arm state, bang_y, impact)
+    specs = [
+        (16, "up", 4, False),
+        (17, "down", 5, True),
+        (16, "mid", 4, False),
+        (17, "down", 5, True),
+    ]
+    for b_top, arm, bang_y, impact in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=28 - b_top, right_arm_dy=2 if arm == "mid" else 4,
+            arm_w=4, eye_dx=1, eye_dy=1,
+        )
+        if arm == "up":
+            # Wind-up: claw cocked high beside the head
+            _rect(g, 24, b_top + 4, 4, 4, TRANSPARENT)
+            _draw_raised_claw(g, 24, b_top + 6, b_top - 5, 1)
+        elif arm == "down":
+            # Knock: arm slams straight down, chunky claw hits the bar beside the feet
+            _rect(g, 24, b_top + 4, 4, 4, TRANSPARENT)
+            _rect(g, 24, b_top + 3, 3, 28 - b_top - 3, TERRACOTTA)
+            _rect(g, 24, 28, 5, 4, TERRACOTTA_DARK)
+            # Motion streaks above the claw
+            _rect(g, 28, 21, 1, 3, LAPTOP_LID)
+            _rect(g, 30, 22, 1, 3, LAPTOP_LID)
+        if impact:
+            # Impact burst flaring out on both sides of the claw at the contact line
+            for sx, sy in ((30, 29), (31, 27), (30, 31), (31, 31), (23, 27)):
+                _px(g, sx, sy, STAR_GOLD)
+        _draw_bang(g, 15, bang_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_confused() -> list[Image.Image]:
+    """6-frame head scratch with one claw under a golden '?'."""
+    frames: list[Image.Image] = []
+    # (scratch claw x or None for arm half-raised, right_arm_dy when lowered, eye_mode, question_y)
+    specs = [
+        (None, 1, "normal", 6),
+        (19, 0, "normal", 5),
+        (17, 0, "normal", 5),
+        (19, 0, "normal", 4),
+        (17, 0, "blink", 5),
+        (None, 3, "normal", 5),
+    ]
+    b_top = 16
+    for claw_x, r_arm, eyes, q_y in specs:
+        g = _new_grid()
+        if claw_x is None:
+            _draw_canonical_clawd(g, right_arm_dy=r_arm, eye_mode=eyes, eye_dx=-1, eye_dy=-1)
+        else:
+            _draw_canonical_clawd(g, eye_mode=eyes, eye_dx=-1, eye_dy=-1)
+            _rect(g, 24, b_top + 4, 4, 4, TRANSPARENT)
+            # Arm angles up from the shoulder to a dark claw rubbing the top of the head
+            _draw_thick_line(g, 24, b_top + 6, 24, b_top - 1, TERRACOTTA)
+            _draw_thick_line(g, 24, b_top - 2, claw_x + 3, b_top - 3, TERRACOTTA)
+            _rect(g, claw_x, b_top - 3, 4, 3, TERRACOTTA_DARK)
+            # Little scratch ticks
+            tick_x = claw_x - 1 if claw_x % 2 else claw_x + 4
+            _px(g, tick_x, b_top - 5, ZZZ_WHITE)
+            _px(g, tick_x + 1, b_top - 6, ZZZ_WHITE)
+        _draw_question(g, 4, q_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_sad() -> list[Image.Image]:
+    """6-frame sad slump: body sinks 1 row, arms droop, droopy eyes and a blue tear drips down."""
+    frames: list[Image.Image] = []
+    # (body_top, arm_dy, tear pixels)
+    specs = [
+        (16, 4, ()),
+        (17, 6, ((10, 22),)),
+        (17, 6, ((10, 22), (10, 23))),
+        (17, 6, ((10, 24), (10, 25))),
+        (17, 6, ((10, 28), (10, 29))),
+        (17, 6, ((9, 31), (10, 31), (11, 31))),
+    ]
+    for b_top, arm_dy, tear in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=28 - b_top, left_arm_dy=arm_dy, right_arm_dy=arm_dy,
+            eye_mode="sad", eye_dy=1,
+        )
+        for tx, ty in tear:
+            _px(g, tx, ty, SWEAT_BLUE)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _draw_scroll(grid: Grid, left_x: int, right_x: int, top: int = 21, bottom: int = 27) -> None:
+    """Parchment scroll between two brown rollers at left_x and right_x (rollers stick out 1 cell)."""
+    if right_x - left_x > 1:
+        _rect(grid, left_x + 1, top, right_x - left_x - 1, bottom - top + 1, PARCHMENT)
+        for ly, length in ((top + 2, right_x - left_x - 5), (top + 4, right_x - left_x - 7)):
+            if length > 0:
+                _rect(grid, left_x + 3, ly, length, 1, SCROLL_INK)
+    for rx in (left_x, right_x):
+        _rect(grid, rx, top - 1, 1, bottom - top + 3, SCROLL_BROWN)
+
+
+def _build_read_scroll() -> list[Image.Image]:
+    """8 frames: 0-2 pull out & unroll a tiny scroll, 3-7 reading loop with eyes scanning the lines."""
+    frames: list[Image.Image] = []
+    # (left roller x, right roller x, scroll top, eye_dx, eye_dy, eye_mode)
+    specs = [
+        (15, 16, 23, 0, 1, "normal"),   # 0: Closed scroll pulled out of the belly
+        (13, 18, 22, 0, 1, "normal"),   # 1: Starting to unroll
+        (10, 21, 22, 0, 1, "normal"),   # 2: Almost open
+        (8, 23, 22, -1, 1, "normal"),   # 3: Read start of the line
+        (8, 23, 22, 0, 1, "normal"),    # 4: Middle
+        (8, 23, 22, 1, 1, "normal"),    # 5: End of the line
+        (8, 23, 22, -1, 2, "normal"),   # 6: Next line
+        (8, 23, 22, 1, 2, "blink"),     # 7: Blink at the end
+    ]
+    for lx, rx, top, edx, edy, eyes in specs:
+        g = _new_grid()
+        fully_open = lx <= 8
+        _draw_canonical_clawd(
+            g, left_arm_dy=5, right_arm_dy=5, arm_w=4 if fully_open else 0,
+            eye_mode=eyes, eye_dx=edx, eye_dy=edy,
+        )
+        _draw_scroll(g, lx, rx, top=top)
+        if not fully_open:
+            # Dark forearms crossing in front of the belly to grip the rollers
+            _rect(g, 4, 21, 4, 4, TERRACOTTA)
+            _rect(g, 24, 21, 4, 4, TERRACOTTA)
+            _rect(g, 8, top + 1, lx - 8, 2, TERRACOTTA_DARK)
+            _rect(g, rx + 1, top + 1, 24 - rx - 1, 2, TERRACOTTA_DARK)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_polish_claw() -> list[Image.Image]:
+    """6-frame loop: buff the right claw with the left paw (crossing in front), a sparkle twinkles."""
+    frames: list[Image.Image] = []
+    # (rubbing paw x offset, sparkle (x, y, big) or None, eye_mode)
+    specs = [
+        (0, None, "normal"),
+        (2, None, "normal"),
+        (0, (30, 9, False), "normal"),
+        (2, None, "normal"),
+        (0, (30, 9, True), "squint"),
+        (1, (30, 9, False), "squint"),
+    ]
+    for off, sparkle, eyes in specs:
+        g = _new_grid()
+        # Left (far) arm reaches behind the head: drawn first so only the part above the body shows
+        _draw_thick_line(g, 10, 22, 21 + off, 12, TERRACOTTA_DARK)
+        _draw_canonical_clawd(g, arm_w=0, eye_mode=eyes, eye_dx=1, eye_dy=-1)
+        # Right claw held up proudly, standing clear of the head on a bent arm
+        _rect(g, 24, 20, 3, 2, TERRACOTTA)
+        _rect(g, 25, 15, 2, 6, TERRACOTTA)
+        _rect(g, 25, 10, 4, 5, TERRACOTTA)
+        # Dark buffing paw rubbing over the raised claw
+        _rect(g, 23 + off, 10, 3, 3, TERRACOTTA_DARK)
+        if sparkle is not None:
+            _draw_sparkle(g, sparkle[0], sparkle[1], big=sparkle[2])
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_dig_sand() -> list[Image.Image]:
+    """6-frame dig loop: the front claw scoops at the ground ahead, sand grains arc up and behind."""
+    frames: list[Image.Image] = []
+    # (claw down?, body_top, sand grains)
+    specs = [
+        (False, 18, ((24, 14),)),
+        (True, 19, ()),
+        (False, 18, ((22, 11), (26, 12))),
+        (True, 19, ((15, 7), (19, 9))),
+        (False, 18, ((8, 7), (12, 6), (25, 13))),
+        (True, 19, ((3, 11), (6, 9), (19, 8))),
+    ]
+    for down, b_top, grains in specs:
+        g = _new_grid()
+        # Sand mound piling up in front
+        _rect(g, 27, 30, 5, 2, SAND_DARK)
+        _rect(g, 28, 29, 3, 1, SAND)
+        _draw_canonical_clawd(
+            g, body_left=9, body_top=b_top, body_height=28 - b_top, arm_w=0, eye_dx=1, eye_dy=1,
+            leg_xs=(9, 13, 19, 23),
+        )
+        _rect(g, 5, b_top + 4, 4, 4, TERRACOTTA)
+        if down:
+            _rect(g, 25, b_top + 3, 2, 26 - b_top, TERRACOTTA)
+            _rect(g, 25, 28, 4, 3, TERRACOTTA_DARK)
+            _px(g, 29, 28, SAND)
+        else:
+            _rect(g, 25, b_top - 2, 4, 4, TERRACOTTA)
+            _rect(g, 25, b_top + 2, 2, 3, TERRACOTTA)
+        for sx, sy in grains:
+            _rect(g, sx, sy, 2, 2, SAND)
+            _px(g, sx + 1, sy + 1, SAND_DARK)
+        if down:
+            # Spray kicked up right at the claw
+            for sx, sy in ((28, 26), (30, 25), (26, 25)):
+                _px(g, sx, sy, SAND)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_perch_dangle() -> list[Image.Image]:
+    """6-frame perch sitting on the title bar edge: seat (body bottom) at grid row 27 = pixel row 55,
+    claws gripping the ledge beside the body and legs dangling below to row 31, swinging gently.
+
+    The controller renders this sprite 8 sprite px lower than standing poses so row 55 rests on the bar.
+    """
+    frames: list[Image.Image] = []
+    # (pair A foot swing, pair B foot swing, eye_mode)
+    specs = [
+        (1, 0, "normal"),
+        (1, 1, "normal"),
+        (0, 1, "normal"),
+        (-1, 0, "normal"),
+        (-1, -1, "blink"),
+        (0, -1, "normal"),
+    ]
+    leg_xs = (8, 12, 18, 22)
+    for swing_a, swing_b, eyes in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, left_arm_dy=8, right_arm_dy=8, leg_bottoms=(29, 29, 29, 29),
+            leg_colors=(TERRACOTTA, TERRACOTTA_DARK, TERRACOTTA, TERRACOTTA_DARK),
+            eye_mode=eyes, eye_dx=1,
+        )
+        for idx, lx in enumerate(leg_xs):
+            swing = swing_a if idx % 2 == 0 else swing_b
+            color = TERRACOTTA if idx % 2 == 0 else TERRACOTTA_DARK
+            # Shin and foot angle further out the more the leg swings
+            _rect(g, lx + swing, 30, 2, 1, color)
+            _rect(g, lx + 2 * swing, 31, 2, 1, color)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_perch_peer() -> list[Image.Image]:
+    """6-frame perch lying on the belly at the title bar edge, head bent over it peering down.
+
+    Belly contact line = bottom of grid row 26 (pixel row 53); the controller renders it 10 sprite px
+    lower. Feet kick up behind the back; claws grip over the edge; eyes look down below the bar.
+    """
+    frames: list[Image.Image] = []
+    # (eye_dx, eye_mode, feet kick phase)
+    specs = [
+        (0, "normal", 0),
+        (-1, "normal", 1),
+        (-1, "normal", 0),
+        (1, "normal", 1),
+        (0, "blink", 0),
+        (1, "normal", 1),
+    ]
+    for edx, eyes, kick in specs:
+        g = _new_grid()
+        # Feet poking up behind the back, kicking alternately
+        for i, fx in enumerate((10, 14, 18, 22)):
+            up = (i + kick) % 2 == 0
+            color = TERRACOTTA if i % 2 == 0 else TERRACOTTA_DARK
+            _rect(g, fx, 15 if up else 17, 2, 4 if up else 2, color)
+        # Flat back resting on the bar (rows 19..26) and the head bent over the edge (rows 27..31)
+        _rect(g, 7, 19, 18, 8, TERRACOTTA)
+        _rect(g, 9, 27, 14, 5, TERRACOTTA)
+        _rect(g, 9, 26, 14, 1, TERRACOTTA_DARK)
+        # Claws gripping over the edge
+        _rect(g, 3, 25, 4, 4, TERRACOTTA)
+        _rect(g, 25, 25, 4, 4, TERRACOTTA)
+        _draw_eye_pair(g, 11 + edx, 19 + edx, 29, eyes)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_wall_scratch() -> list[Image.Image]:
+    """6-frame loop facing a wall at the right frame edge: claws scratch/drum upward, marks appear."""
+    frames: list[Image.Image] = []
+    # (front claw top y, back claw top y, scratch marks on the wall)
+    specs = [
+        (10, 13, ((31, 16),)),
+        (12, 9, ((31, 16), (31, 11))),
+        (9, 12, ((31, 16), (31, 11), (31, 13))),
+        (11, 8, ((31, 11), (31, 13))),
+        (8, 11, ((31, 13), (31, 9))),
+        (11, 10, ((31, 9),)),
+    ]
+    for front_y, back_y, marks in specs:
+        g = _new_grid()
+        # Back (far) arm first so the front one overlaps it
+        _rect(g, 28, back_y + 2, 2, 21 - back_y, TERRACOTTA_DARK)
+        _rect(g, 28, back_y, 4, 2, TERRACOTTA_DARK)
+        _draw_canonical_clawd(
+            g, body_left=10, body_top=16, arm_w=0, leg_xs=(10, 14, 20, 24), eye_dx=1, eye_dy=-1,
+        )
+        _rect(g, 6, 20, 4, 4, TERRACOTTA)
+        _rect(g, 26, front_y + 2, 2, 22 - front_y, TERRACOTTA)
+        _rect(g, 26, front_y, 5, 3, TERRACOTTA)
+        for mx, my in marks:
+            _rect(g, mx, my, 1, 2, LAPTOP_LID)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_wave_goodbye() -> list[Image.Image]:
+    """6-frame goodbye: one claw waves overhead side to side with happy squint eyes."""
+    frames: list[Image.Image] = []
+    # (claw tip_dx or None for the arm lifting/lowering at its side, right_arm_dy, body_top)
+    specs = [
+        (None, 1, 16),
+        (-1, 0, 16),
+        (1, 0, 15),
+        (-1, 0, 16),
+        (1, 0, 15),
+        (None, 2, 16),
+    ]
+    for tip, r_arm, b_top in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=28 - b_top, right_arm_dy=r_arm, eye_mode="squint",
+        )
+        if tip is not None:
+            _rect(g, 24, b_top + r_arm, 4, 4, TRANSPARENT)
+            _draw_raised_claw(g, 24, b_top + 5, b_top - 6, tip)
+            # Motion ticks trailing the wave on the side the claw just left
+            ticks = ((27, b_top - 7), (28, b_top - 4)) if tip < 0 else ((22, b_top - 7), (21, b_top - 4))
+            for tx, ty in ticks:
+                _rect(g, tx, ty, 1, 2, ZZZ_WHITE)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_walk_mail() -> list[Image.Image]:
+    """8-frame walk_horizontal leg cycle carrying a sealed envelope overhead with both claws."""
+    frames: list[Image.Image] = []
+    for b_top, l_xs, l_bots, l_cols, _l_arm, _r_arm in _WALK_SPECS:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g,
+            body_top=b_top,
+            body_height=28 - b_top,
+            arm_w=0,
+            leg_xs=l_xs,
+            leg_bottoms=l_bots,
+            leg_colors=l_cols,
+            eye_dx=1,
+        )
+        env_y = b_top - 12
+        _rect(g, 11, env_y + 4, 2, b_top - env_y - 4, TERRACOTTA_DARK)
+        _rect(g, 19, env_y + 4, 2, b_top - env_y - 4, TERRACOTTA)
+        _draw_envelope(g, 10, env_y, w=12, h=7)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _draw_held_envelope(grid: Grid, env_y: int) -> None:
+    """Envelope held out in front of the belly, gripped by dark paws crossing in from both arms."""
+    _draw_envelope(grid, 11, env_y, w=10, h=7)
+    _rect(grid, 8, env_y + 2, 4, 3, TERRACOTTA_DARK)
+    _rect(grid, 20, env_y + 2, 4, 3, TERRACOTTA_DARK)
+
+
+def _build_hold_mail() -> list[Image.Image]:
+    """4-frame standing loop presenting an envelope in front with a small bob."""
+    frames: list[Image.Image] = []
+    # (body_top, envelope y, eye_mode)
+    specs = [
+        (16, 20, "normal"),
+        (16, 21, "normal"),
+        (17, 21, "normal"),
+        (16, 20, "blink"),
+    ]
+    for b_top, env_y, eyes in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=28 - b_top, left_arm_dy=5, right_arm_dy=5, eye_mode=eyes,
+        )
+        _draw_held_envelope(g, env_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_give_mail() -> list[Image.Image]:
+    """4-frame hand-off: hold, push the envelope forward, it leaves, a heart pops up."""
+    frames: list[Image.Image] = []
+
+    g0 = _new_grid()
+    _draw_canonical_clawd(g0, left_arm_dy=5, right_arm_dy=5)
+    _draw_held_envelope(g0, 20)
+    frames.append(_grid_to_image(g0))
+
+    # 1: Lean in and thrust the envelope forward (to the right)
+    g1 = _new_grid()
+    _draw_canonical_clawd(g1, body_left=9, left_arm_dy=5, right_arm_dy=4, eye_dx=1, arm_w=4)
+    _rect(g1, 25, 20, 3, 3, TRANSPARENT)
+    _rect(g1, 25, 21, 4, 2, TERRACOTTA)
+    _draw_envelope(g1, 22, 15, w=9, h=6)
+    _rect(g1, 27, 20, 3, 2, TERRACOTTA_DARK)
+    frames.append(_grid_to_image(g1))
+
+    # 2: Envelope is gone (whoosh lines), heart appears
+    g2 = _new_grid()
+    _draw_canonical_clawd(g2, body_left=9, left_arm_dy=5, right_arm_dy=3, eye_mode="squint", eye_dx=1)
+    for wx, wy in ((29, 14), (30, 14), (28, 17), (29, 17), (30, 17)):
+        _px(g2, wx, wy, ZZZ_WHITE)
+    _draw_heart(g2, 15, 9)
+    frames.append(_grid_to_image(g2))
+
+    # 3: Settle, heart floats up
+    g3 = _new_grid()
+    _draw_canonical_clawd(g3, eye_mode="squint", eye_dy=1)
+    _draw_heart(g3, 14, 5)
+    frames.append(_grid_to_image(g3))
+    return frames
+
+
+def _build_listen_tilt() -> list[Image.Image]:
+    """4-frame attentive listen: head tilted (top rows shifted 1 cell right), claw raised like an ear."""
+    frames: list[Image.Image] = []
+    # (ear claw top y, eye_mode)
+    specs = [
+        (13, "normal"),
+        (12, "normal"),
+        (13, "normal"),
+        (13, "blink"),
+    ]
+    for claw_y, eyes in specs:
+        g = _new_grid()
+        _draw_canonical_clawd(g, arm_w=0, eye_mode=eyes, eye_dx=1)
+        _rect(g, 4, 20, 4, 4, TERRACOTTA)
+        # Stepped shear: the crown leans 2 cells, the eye band 1 cell -> head tilted toward the sound
+        _shift_rows(g, 14, 17, 2)
+        _shift_rows(g, 18, 19, 1)
+        # Right claw cupped up beside the head like an ear
+        _rect(g, 24, 20, 4, 3, TERRACOTTA)
+        _rect(g, 26, claw_y + 3, 2, 21 - claw_y - 3, TERRACOTTA)
+        _rect(g, 27, claw_y, 3, 4, TERRACOTTA)
+        _px(g, 27, claw_y + 1, TERRACOTTA_DARK)
+        _px(g, 27, claw_y + 2, TERRACOTTA_DARK)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
 def generate_all_sprites(output_dir: Path | None = None) -> Path:
     """Generate all authentic docs/clawd.png sprite strips, manifest.json, and clawdlet.ico."""
     if output_dir is None:
@@ -1710,6 +2580,31 @@ def generate_all_sprites(output_dir: Path | None = None) -> Path:
         "error_sweat": {"frames": _build_error_sweat(), "fps": 4.3, "loop": False},
         "alert": {"frames": _build_alert(), "fps": 4.0, "loop": True},
         "push_window": {"frames": _build_push_window(), "fps": 6.0, "loop": True},
+        # Milestone 6: work breaks (same desk layout as the typing loop), molt, alert escalation,
+        # idle tiers, perch variants, mail delivery, goodbye and listening
+        "typing_loop": {"frames": _build_typing_loop(), "fps": 5.5, "loop": True},
+        "work_glance": {"frames": _build_work_glance(), "fps": 5.3, "loop": True},
+        "work_stretch": {"frames": _build_work_stretch(), "fps": 4.0, "loop": False},
+        "work_think": {"frames": _build_work_think(), "fps": 3.0, "loop": True},
+        "work_sip": {"frames": _build_work_sip(), "fps": 4.0, "loop": False},
+        "juggle": {"frames": _build_juggle(), "fps": 8.0, "loop": True},
+        "molt": {"frames": _build_molt(), "fps": 5.0, "loop": False},
+        "molt_shell": {"frames": _build_molt_shell(), "fps": 2.0, "loop": False},
+        "alert_wave": {"frames": _build_alert_wave(), "fps": 6.0, "loop": True},
+        "alert_tap": {"frames": _build_alert_tap(), "fps": 6.0, "loop": True},
+        "confused": {"frames": _build_confused(), "fps": 4.0, "loop": False},
+        "sad": {"frames": _build_sad(), "fps": 3.0, "loop": False},
+        "read_scroll": {"frames": _build_read_scroll(), "fps": 3.0, "loop": True, "loop_start": 3},
+        "polish_claw": {"frames": _build_polish_claw(), "fps": 4.0, "loop": True},
+        "dig_sand": {"frames": _build_dig_sand(), "fps": 6.0, "loop": True},
+        "perch_dangle": {"frames": _build_perch_dangle(), "fps": 3.0, "loop": True},
+        "perch_peer": {"frames": _build_perch_peer(), "fps": 3.0, "loop": True},
+        "wall_scratch": {"frames": _build_wall_scratch(), "fps": 8.0, "loop": True},
+        "wave_goodbye": {"frames": _build_wave_goodbye(), "fps": 5.0, "loop": False},
+        "walk_mail": {"frames": _build_walk_mail(), "fps": 8.0, "loop": True},
+        "hold_mail": {"frames": _build_hold_mail(), "fps": 3.0, "loop": True},
+        "give_mail": {"frames": _build_give_mail(), "fps": 5.0, "loop": False},
+        "listen_tilt": {"frames": _build_listen_tilt(), "fps": 2.5, "loop": True},
     }
 
     manifest: dict[str, object] = {
