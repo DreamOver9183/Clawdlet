@@ -45,6 +45,13 @@ let clawd = new WindowCompanion({ gravity: true });
 - **Touch & combos (`觸摸與連擊`)**: single-click to **poke**, rub the mouse back and forth over it to **pet** it (hearts!), click 3+ times fast for a **tantrum**.
 - **Sleep schedule (`作息與睡眠`)**: after 90 s without keyboard/mouse input it yawns and dozes off (`Zzz`); touch anything and it jolts awake.
 - **Peek from screen edge (`邊緣躲藏`)**: a tray toggle that makes Clawd hide half-visible at the nearest screen edge and lean out to wave when your cursor comes close.
+- **Tiered idle (`分層閒置`)**: the longer you're away, the more Clawd gets up to.
+  - **L1**: while resting it now and then glances left and right, blinks, or looks over at Claude's window (down at it when perched on it). Purely cosmetic. | 休息時偶爾左右張望、眨眼、看向 Claude 視窗（坐在上面時就往下看）。
+  - **L2** (no input for 45 s): it unrolls a **scroll** to read (often followed by **polishing a claw**), or **digs in the sand** on the floor. | 45 秒沒操作後：看卷軸（看完常接著擦爪子）、在地上挖沙。
+  - **L3** (90 s): yawn → sleep, as before — straight out of whatever L2 hobby it was on. | 90 秒：打哈欠 → 睡覺，L2 動作中也會直接睡著。
+- **Position-aware actions (`位置感知動作`)**: at either end of Claude's title bar it may sit facing out with its **legs dangling** over the edge; with your cursor inside the window it may lean over and **peer down** at it; walking into a screen edge without climbing it, it sometimes **scratches the wall** before turning around; and arriving at the side of Claude's window it may **drum on it** before climbing up. | 在標題列兩端會面朝外坐著晃腳；游標在視窗內時會探頭往下看；撞到螢幕邊沒爬上去時會抓抓牆再轉身；走到 Claude 視窗側邊時可能先敲一敲再爬上去。
+
+All of these are rows in the [behavior config](#-behavior-config--行為設定檔) (`read_scroll`, `polish_claw`, `dig_sand`, `perch_dangle`, `perch_peer`, `edge_scratch`, `window_drum`, the `fidgets` list, and `settings.idle_level2_after_s` / `fidget_interval_s`), so you can tune their weights, chances, durations and cooldowns or switch them off. | 以上都是行為設定檔裡的列，權重、機率、時長、冷卻都能調，也能關掉。
 
 ### 6. Claude Code Hooks | Claude Code 連動（v0.2.0）
 Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://code.claude.com/docs/en/hooks) and reacts to what your agent is doing:
@@ -78,8 +85,8 @@ The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Claw
 
 ## 🧩 Behavior Config | 行為設定檔
 
-What Clawd does when it is just hanging around comes from a JSON behavior table (in the spirit of Shimeji's `behaviors.xml`). The bundled `assets/behaviors/behaviors.default.json` reproduces the built-in behavior exactly; your own file **`%APPDATA%\Clawdlet\behaviors.json`** is merged on top of it. Engine-driven moves — being dragged, falling, reactions, typing, seeking Claude, wandering — stay in code; the table decides the idle choice after them.
-閒晃時要做什麼由 JSON 行為表決定。內建的 `behaviors.default.json` 與原本行為完全相同；你的 **`%APPDATA%\Clawdlet\behaviors.json`** 會合併在它上面。拖曳、掉落、反應、打字、找 Claude、閒逛等仍由程式決定，表格只決定之後的閒置動作。
+What Clawd does when it is just hanging around comes from a JSON behavior table (in the spirit of Shimeji's `behaviors.xml`). The bundled `assets/behaviors/behaviors.default.json` reproduces the original idle choices exactly while you're around and adds the tiered-idle and position-aware rows; your own file **`%APPDATA%\Clawdlet\behaviors.json`** is merged on top of it. Engine-driven moves — being dragged, falling, reactions, typing, seeking Claude, wandering — stay in code; the table decides the idle choice after them.
+閒晃時要做什麼由 JSON 行為表決定。內建的 `behaviors.default.json` 在你活動時與原本的閒置選擇完全相同，另外加上分層閒置與位置感知的列；你的 **`%APPDATA%\Clawdlet\behaviors.json`** 會合併在它上面。拖曳、掉落、反應、打字、找 Claude、閒逛等仍由程式決定，表格只決定之後的閒置動作。
 
 ```json
 {
@@ -94,7 +101,8 @@ What Clawd does when it is just hanging around comes from a JSON behavior table 
 ```
 
 - **`extends: "default"`** (the default): a row with an existing `id` is patched field by field (a nested `when` / `next` / `weight` object is replaced as a whole), new ids are appended, and `settings` are deep-merged. **`extends: "none"`** replaces the bundled table. | 同 `id` 逐欄覆寫（巢狀的 `when` 整個取代）、新 `id` 附加；`none` 則整份取代。
-- **Rows | 欄位**: `state` (`IDLE`, `BLOB`, `PERCH_CLAUDE` for now), `weight` (number or `{"quiet", "normal", "hyper"}`), optional `chance` (rolled on its own before the weighted pick), `when` (`surface`, `spot`, `mode`, idle level, `user_idle_s`, `claude_visible` / `claude_foreground`, `cursor_in_window`, `prev_state` / `not_prev_state`), `duration_s`, `scale_by_rest`, `cooldown_s`, `next` + `next_mode` (`add` / `replace`, up to 4 steps), `enabled`, `description`. `settings.work` sets the typing segment / break lengths.
+- **Rows | 欄位**: `state` (`IDLE`, `BLOB`, `PERCH_CLAUDE`, `READ_SCROLL`, `POLISH_CLAW`, `DIG_SAND`, `PERCH_DANGLE`, `PERCH_PEER`, `WALL_SCRATCH`), `on` (`rest`, or `wall_bump` / `window_side` for the scratching rows), `weight` (number or `{"quiet", "normal", "hyper"}`), optional `chance` (rolled on its own before the weighted pick), `when` (`surface`, `spot`, `mode`, idle level, `user_idle_s`, `claude_visible` / `claude_foreground`, `cursor_in_window`, `prev_state` / `not_prev_state`), `duration_s`, `scale_by_rest`, `cooldown_s`, `next` + `next_mode` (`add` / `replace`, up to 4 steps), `enabled`, `description`. `settings.work` sets the typing segment / break lengths.
+- **Fidgets | 小動作**: `fidgets` rows play poses from the `gaze` strip over a resting Clawd every `settings.fidget_interval_s`: either `"poses": [[gaze_index, hold_s], ...]` (index `(dy+1)*3+(dx+1)`: 3 left, 4 ahead, 5 right, 7 down, 9 blink) or `"target": "claude_window"` with `hold_s`. | 每隔 `fidget_interval_s` 從 `gaze` 條帶播一段姿勢：`poses` 指定索引與停留秒數，或 `target: "claude_window"` 看向 Claude 視窗。
 - **Errors are forgiving | 容錯**: an invalid row is dropped with a warning naming it and the rest still load; a file that is not valid JSON or has the wrong `version` is ignored with one message (`[Clawdlet] behaviors.json: … — using defaults`).
 - **Tray | 系統匣**: **重新載入行為設定 (Reload Behaviors)** applies your edits without restarting; **開啟設定資料夾 (Open Config Folder)** creates an empty `behaviors.json` template (plus a copy of `behaviors.schema.json`) if missing and opens the folder.
 - **Autocompletion | 自動補完**: keep `"$schema": "./behaviors.schema.json"` and VS Code offers every key and value while you type.

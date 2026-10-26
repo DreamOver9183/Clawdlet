@@ -13,6 +13,12 @@ Rows
     ``next`` ``[{id, weight}]`` with ``next_mode`` ``add`` | ``replace``, ``enabled``,
     ``description``. Keys starting with ``$`` are ignored everywhere.
 
+Fidgets (cosmetic, L1)
+    ``id``, ``weight``, ``when``, ``cooldown_s``, ``enabled``, ``description`` and either ``poses``
+    (``[[gaze_index, hold_s], ...]`` played in order over a resting pose; indices are the ``gaze``
+    strip: ``(dy + 1) * 3 + (dx + 1)``, 9 = blink) or ``target`` (``"claude_window"``: look toward
+    Claude Desktop, down when perched on it) with ``hold_s`` (seconds or ``[min, max]``).
+
 Merging (user file)
     ``extends: "default"`` (the default): a row whose ``id`` already exists is shallow-patched
     (``{"id": "floor_blob", "enabled": false}``; a ``when`` / ``next`` / ``weight`` value replaces
@@ -48,14 +54,26 @@ SPOTS = ("open", "screen_edge", "window_side", "perch_edge", "perch_middle")
 TRIGGERS = ("rest", "wall_bump", "window_side")
 EXTENDS = ("default", "none")
 NEXT_MODES = ("add", "replace")
-FIDGET_POSES = ("look_left", "look_right", "blink", "look_claude")
+GAZE_POSES = 10                          # gaze strip: 3x3 look directions, then a blink
+FIDGET_TARGETS = ("claude_window",)
+FIDGET_HOLD_RANGE = (0.05, 10.0)
 ENTRANCE_KINDS = ("drop_on_claude", "drop_top", "walk_in_side")
 MAX_CHAIN_DEPTH = 4
 DURATION_RANGE = (0.2, 120.0)
 SECTIONS = ("behaviors", "work_breaks", "fidgets", "entrances")
 
 # States the table may start. Later phases extend these as their states land in PetState.
-SELECTABLE_STATES = frozenset({"IDLE", "BLOB", "PERCH_CLAUDE"})
+SELECTABLE_STATES = frozenset({
+    "IDLE",
+    "BLOB",
+    "PERCH_CLAUDE",
+    "READ_SCROLL",
+    "POLISH_CLAW",
+    "DIG_SAND",
+    "PERCH_DANGLE",
+    "PERCH_PEER",
+    "WALL_SCRATCH",
+})
 WORK_BREAK_STATES = frozenset({"WORK_GLANCE", "WORK_STRETCH", "WORK_THINK", "WORK_SIP"})
 
 # Surfaces each selectable state can be shown on (intersected with ``when.surface``)
@@ -63,6 +81,12 @@ _STATE_SURFACES: dict[str, tuple[str, ...]] = {
     "IDLE": ("floor",),
     "BLOB": ("floor", "perch"),
     "PERCH_CLAUDE": ("perch",),
+    "READ_SCROLL": ("floor", "perch"),
+    "POLISH_CLAW": ("floor", "perch"),
+    "DIG_SAND": ("floor",),
+    "PERCH_DANGLE": ("perch",),
+    "PERCH_PEER": ("perch",),
+    "WALL_SCRATCH": ("floor",),
     "WORK_GLANCE": ("floor", "perch"),
     "WORK_STRETCH": ("floor", "perch"),
     "WORK_THINK": ("floor", "perch"),
@@ -100,7 +124,7 @@ _BEHAVIOR_KEYS = frozenset({
     "description",
 })
 _FIDGET_KEYS = frozenset(
-    {"id", "pose", "weight", "when", "duration_s", "cooldown_s", "enabled", "description"}
+    {"id", "weight", "poses", "target", "hold_s", "when", "cooldown_s", "enabled", "description"}
 )
 _ENTRANCE_KEYS = frozenset({"id", "kind", "weight", "when", "enabled", "description"})
 _SETTINGS_KEYS = frozenset({
@@ -267,23 +291,35 @@ WorkBreakRow = BehaviorRow
 
 @dataclass(frozen=True)
 class FidgetRow:
-    """A cosmetic pose played over a resting state (Phase 5)."""
+    """A cosmetic pose script played over IDLE / PERCH_CLAUDE (L1 idle: glances and blinks).
+
+    Either ``poses`` (``(gaze_index, hold_s)`` steps) or ``target`` + ``hold_s`` (one look toward
+    a computed direction, held for ``uniform(*hold_s)`` seconds).
+    """
 
     id: str
-    pose: str
     weight: Weight = 1.0
+    poses: tuple[tuple[int, float], ...] = ()
+    target: str | None = None
+    hold_s: tuple[float, float] = (0.8, 1.6)
     when: Condition = field(default_factory=Condition)
-    duration_s: tuple[float, float] = (0.6, 1.4)
     cooldown_s: float = 0.0
     enabled: bool = True
     description: str = ""
 
+    def weight_for(self, mode: str) -> float:
+        return _weight_for(self.weight, mode)
+
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"id": self.id, "pose": self.pose, "weight": self.weight}
+        out: dict[str, Any] = {"id": self.id, "weight": self.weight}
+        if self.target is not None:
+            out["target"] = self.target
+            out["hold_s"] = list(self.hold_s)
+        else:
+            out["poses"] = [[index, hold] for index, hold in self.poses]
         when = self.when.to_dict()
         if when:
             out["when"] = when
-        out["duration_s"] = list(self.duration_s)
         if self.cooldown_s:
             out["cooldown_s"] = self.cooldown_s
         out["enabled"] = self.enabled
@@ -588,15 +624,48 @@ def _parse_fidget_row(raw: Any, seen: set[str], warnings: list[str]) -> FidgetRo
     row_id = _parse_id(raw, seen)
     where = f"fidgets[{row_id}]"
     _unknown_keys(raw, _FIDGET_KEYS, where, warnings)
-    pose = raw.get("pose")
-    if pose not in FIDGET_POSES:
-        raise _RowError(f"pose must be one of {', '.join(FIDGET_POSES)}, got {pose!r}")
+    has_poses, has_target = "poses" in raw, "target" in raw
+    if has_poses == has_target:
+        raise _RowError("needs exactly one of poses or target")
+    poses: list[tuple[int, float]] = []
+    target = None
+    hold = FidgetRow.hold_s
+    lo_hold, hi_hold = FIDGET_HOLD_RANGE
+    if has_poses:
+        if "hold_s" in raw:
+            warnings.append(f"{where}: hold_s only applies to target rows; ignored")
+        steps = raw["poses"]
+        if not isinstance(steps, list) or not steps:
+            raise _RowError("poses must be a non-empty list of [gaze_index, hold_s]")
+        for step in steps:
+            if (
+                not isinstance(step, list)
+                or len(step) != 2
+                or not isinstance(step[0], int)
+                or isinstance(step[0], bool)
+                or not 0 <= step[0] < GAZE_POSES
+                or not _is_number(step[1])
+                or not lo_hold <= step[1] <= hi_hold
+            ):
+                raise _RowError(
+                    f"poses entries must be [0..{GAZE_POSES - 1}, {lo_hold}..{hi_hold} s], got {step!r}"
+                )
+            poses.append((step[0], float(step[1])))
+    else:
+        target = raw["target"]
+        if target not in FIDGET_TARGETS:
+            raise _RowError(f"target must be one of {', '.join(FIDGET_TARGETS)}, got {target!r}")
+        hold_raw = raw.get("hold_s", list(hold))
+        if _is_number(hold_raw):
+            hold_raw = [hold_raw, hold_raw]
+        hold = _span(hold_raw, "hold_s", lo_hold, hi_hold)
     return FidgetRow(
         id=row_id,
-        pose=pose,
         weight=_weight(raw.get("weight", 1.0)),
+        poses=tuple(poses),
+        target=target,
+        hold_s=hold,
         when=_parse_condition(raw.get("when"), where, warnings),
-        duration_s=_span(raw.get("duration_s", [0.6, 1.4]), "duration_s", 0.05, DURATION_RANGE[1]),
         cooldown_s=_number(raw.get("cooldown_s", 0.0), "cooldown_s"),
         enabled=_bool(raw.get("enabled", True), "enabled"),
         description=str(raw.get("description", "")),
@@ -820,6 +889,84 @@ LEGACY_DATA: dict[str, Any] = {
             "scale_by_rest": True,
             "description": "Sit and peek down at the chat after a stroll along the title bar.",
         },
+        # L2 idle: only once the user has been away for settings.idle_level2_after_s. Weights are
+        # in the same legacy-roll units as the rows above (so they share the idle tail with them).
+        {
+            "id": "read_scroll",
+            "state": "READ_SCROLL",
+            "weight": 0.15,
+            "when": {"min_idle_level": 2},
+            "duration_s": [5.0, 9.0],
+            "scale_by_rest": True,
+            "cooldown_s": 40.0,
+            "next": [{"id": "polish_claw", "weight": 0.25}],
+            "next_mode": "add",
+            "description": "Unroll a little scroll and read it (often followed by polishing a claw).",
+        },
+        {
+            "id": "polish_claw",
+            "state": "POLISH_CLAW",
+            "weight": 0.12,
+            "when": {"min_idle_level": 2},
+            "duration_s": [3.0, 6.0],
+            "scale_by_rest": True,
+            "description": "Buff a claw to a shine.",
+        },
+        {
+            "id": "dig_sand",
+            "state": "DIG_SAND",
+            "weight": 0.10,
+            "when": {"surface": ["floor"], "min_idle_level": 2},
+            "duration_s": [4.0, 7.0],
+            "scale_by_rest": True,
+            "cooldown_s": 60.0,
+            "description": "Dig in the sand on the floor.",
+        },
+        # Position-aware actions: opportunistic (chance) rows, rolled before the weighted pick
+        {
+            "id": "perch_dangle",
+            "state": "PERCH_DANGLE",
+            "chance": 0.35,
+            "weight": 0.0,
+            "when": {"surface": ["perch"], "spot": ["perch_edge"]},
+            "duration_s": [4.0, 8.0],
+            "scale_by_rest": True,
+            "cooldown_s": 30.0,
+            "description": "Sit at the end of the title bar, facing out, legs dangling over the edge.",
+        },
+        {
+            "id": "perch_peer",
+            "state": "PERCH_PEER",
+            "chance": 0.25,
+            "weight": 0.0,
+            "when": {"surface": ["perch"], "cursor_in_window": True},
+            "duration_s": [3.0, 6.0],
+            "scale_by_rest": True,
+            "cooldown_s": 45.0,
+            "description": "Lean over the title bar and peer down into the window at the cursor.",
+        },
+        {
+            "id": "edge_scratch",
+            "state": "WALL_SCRATCH",
+            "on": "wall_bump",
+            "chance": 0.3,
+            "weight": 0.0,
+            "duration_s": [1.5, 3.0],
+            "scale_by_rest": False,
+            "cooldown_s": 20.0,
+            "description": "Walked into a screen edge without climbing it: scratch at it, then turn around.",
+        },
+        {
+            "id": "window_drum",
+            "state": "WALL_SCRATCH",
+            "on": "window_side",
+            "chance": 0.4,
+            "weight": 0.0,
+            "duration_s": [1.2, 2.4],
+            "scale_by_rest": False,
+            "cooldown_s": 60.0,
+            "description": "Reached the side of Claude's window: drum on it a little, then climb.",
+        },
     ],
     "work_breaks": [
         {
@@ -853,7 +1000,28 @@ LEGACY_DATA: dict[str, Any] = {
             "description": "Look up from the laptop for a moment.",
         },
     ],
-    "fidgets": [],
+    "fidgets": [
+        {
+            "id": "look_left_right",
+            "weight": 3.0,
+            "poses": [[3, 0.6], [4, 0.25], [5, 0.6], [4, 0.2]],
+            "description": "Glance left, then right.",
+        },
+        {
+            "id": "blink",
+            "weight": 2.0,
+            "poses": [[9, 0.14], [4, 0.18], [9, 0.14]],
+            "description": "A slow double blink.",
+        },
+        {
+            "id": "glance_claude",
+            "weight": 2.0,
+            "target": "claude_window",
+            "hold_s": [0.8, 1.6],
+            "when": {"claude_visible": True},
+            "description": "Look over at Claude's window (down at it when perched on it).",
+        },
+    ],
     "entrances": [],
 }
 
@@ -1011,6 +1179,7 @@ def ensure_user_config(config_dir: Path) -> Path:
 
 WORK_BREAK_TRIGGER = "work_break"
 _WORK_BREAK_KEY = "work_breaks/"  # Cooldown keys: a break id may repeat a behavior id
+_FIDGET_KEY = "fidgets/"
 
 
 class BehaviorSelector:
@@ -1107,6 +1276,34 @@ class BehaviorSelector:
             return None
         self._chain_depth = self._chain_depth + 1 if chained else 0
         return self._started(picked, ctx)
+
+    def pick_fidget(self, ctx: IdleContext, rng: random.Random) -> FidgetRow | None:
+        """Weighted pick from ``fidgets`` drawn from ``rng`` (the controller's cosmetic stream).
+
+        Rows on cooldown or whose ``when`` fails sit out; None when nothing is eligible.
+        """
+        pool: list[tuple[FidgetRow, float]] = []
+        for row in self.table.fidgets:
+            if not row.enabled or not row.when.matches(ctx):
+                continue
+            last = self._last_start.get(_FIDGET_KEY + row.id)
+            if row.cooldown_s > 0.0 and last is not None and ctx.now - last < row.cooldown_s:
+                continue
+            weight = row.weight_for(ctx.mode)
+            if weight > 0.0:
+                pool.append((row, weight))
+        if not pool:
+            return None
+        target = rng.random() * sum(w for _, w in pool)
+        picked = pool[-1][0]
+        cum = 0.0
+        for row, w in pool:
+            cum += w
+            if target < cum:
+                picked = row
+                break
+        self._last_start[_FIDGET_KEY + picked.id] = ctx.now
+        return picked
 
     def pick_work_break(self, ctx: IdleContext) -> BehaviorRow | None:
         """Weighted pick from ``work_breaks`` (the ``work_break`` trigger: the section itself).

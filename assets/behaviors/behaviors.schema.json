@@ -28,7 +28,8 @@
         "DRAGGED", "FALLING", "THROWN", "LAND_SQUISH", "DIZZY", "CHASE_CURSOR", "POUNCE", "POKED",
         "PETTED", "FLAIL", "YAWN", "SLEEP", "WAKE_STARTLE", "PEEK_EDGE", "CELEBRATE", "ERROR_SWEAT",
         "ALERT", "PUSH_WINDOW", "WORK_GLANCE", "WORK_STRETCH", "WORK_THINK", "WORK_SIP", "JUGGLE",
-        "MOLT", "CONFUSED", "SAD"
+        "MOLT", "CONFUSED", "SAD", "READ_SCROLL", "POLISH_CLAW", "DIG_SAND", "PERCH_DANGLE",
+        "PERCH_PEER", "WALL_SCRATCH"
       ]
     },
     "span": {
@@ -101,10 +102,17 @@
       "type": "object",
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "state": {"enum": ["IDLE", "BLOB", "PERCH_CLAUDE"], "description": "PetState to start (IDLE: floor only, PERCH_CLAUDE: perch only)."},
+        "state": {
+          "enum": ["IDLE", "BLOB", "PERCH_CLAUDE", "READ_SCROLL", "POLISH_CLAW", "DIG_SAND", "PERCH_DANGLE", "PERCH_PEER", "WALL_SCRATCH"],
+          "description": "PetState to start. Floor only: IDLE, DIG_SAND, WALL_SCRATCH. Perch only: PERCH_CLAUDE, PERCH_DANGLE (snaps to the nearer end of the title bar), PERCH_PEER. Either: BLOB, READ_SCROLL, POLISH_CLAW."
+        },
         "weight": {"$ref": "#/$defs/weight"},
         "chance": {"type": "number", "minimum": 0, "maximum": 1, "description": "Opportunistic row: rolled on its own before the weighted pick."},
-        "on": {"enum": ["rest", "wall_bump", "window_side"], "default": "rest"},
+        "on": {
+          "enum": ["rest", "wall_bump", "window_side"],
+          "default": "rest",
+          "description": "rest: a rest decision. wall_bump: walked into a screen edge and did not climb it (Clawd faces the wall, then turns around). window_side: arrived at the side of Claude's window to climb it (Clawd faces the window, then climbs)."
+        },
         "when": {"$ref": "#/$defs/when"},
         "duration_s": {"$ref": "#/$defs/duration"},
         "scale_by_rest": {"type": "boolean", "default": true, "description": "Multiply the duration by the activity mode's rest multiplier."},
@@ -134,12 +142,33 @@
     },
     "fidget": {
       "type": "object",
+      "description": "Cosmetic glance played over IDLE / PERCH_CLAUDE every settings.fidget_interval_s. Give either poses or target (+ hold_s).",
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "pose": {"enum": ["look_left", "look_right", "blink", "look_claude"]},
         "weight": {"$ref": "#/$defs/weight"},
+        "poses": {
+          "type": "array",
+          "minItems": 1,
+          "description": "[[gaze_index, hold_s], ...] played in order. gaze_index = (dy+1)*3+(dx+1): 0 up-left, 1 up, 2 up-right, 3 left, 4 ahead, 5 right, 6 down-left, 7 down, 8 down-right, 9 blink.",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "integer", "minimum": 0, "maximum": 9},
+              {"type": "number", "minimum": 0.05, "maximum": 10}
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "target": {"enum": ["claude_window"], "description": "Look toward Claude Desktop's window (down at it when perched on it)."},
+        "hold_s": {
+          "description": "Target rows: seconds to hold the look, or [min, max].",
+          "oneOf": [
+            {"type": "number", "minimum": 0.05, "maximum": 10},
+            {"type": "array", "items": {"type": "number", "minimum": 0.05, "maximum": 10}, "minItems": 2, "maxItems": 2}
+          ]
+        },
         "when": {"$ref": "#/$defs/when"},
-        "duration_s": {"type": "array", "items": {"type": "number", "minimum": 0.05}, "minItems": 2, "maxItems": 2},
         "cooldown_s": {"type": "number", "minimum": 0},
         "enabled": {"type": "boolean", "default": true},
         "description": {"type": "string"}
@@ -164,7 +193,7 @@
       "type": "object",
       "properties": {
         "idle_level2_after_s": {"type": "number", "minimum": 0, "description": "User idle seconds before idle level 2."},
-        "fidget_interval_s": {"$ref": "#/$defs/span"},
+        "fidget_interval_s": {"$ref": "#/$defs/span", "description": "Seconds between fidgets (glances, blinks) while resting, [min, max]."},
         "mail_away_s": {"type": "number", "minimum": 0},
         "alert_escalate_s": {"type": "number", "minimum": 0, "description": "Seconds an unanswered '!' waits before Clawd starts waving (2 s wave, 4 s '!', repeating)."},
         "work": {

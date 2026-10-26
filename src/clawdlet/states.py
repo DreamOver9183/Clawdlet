@@ -6,7 +6,7 @@ from enum import Enum
 
 
 class PetState(str, Enum):
-    """Milestone 1–3 behavior states for Clawdlet."""
+    """Behavior states for Clawdlet (value = sprite strip name)."""
 
     IDLE = "idle_breathe"
     BLOB = "idle_blob"
@@ -45,6 +45,13 @@ class PetState(str, Enum):
     MOLT = "molt"                # The conversation was compacted: shed the old shell
     CONFUSED = "confused"        # First tool failure in a streak
     SAD = "sad"                  # Third failure in a streak, or a turn that failed outright
+    # Milestone 6 tiered idle (L2, after the user has been away a while) and position-aware actions
+    READ_SCROLL = "read_scroll"    # Unroll a little scroll and read it
+    POLISH_CLAW = "polish_claw"    # Buff a claw to a shine
+    DIG_SAND = "dig_sand"          # Dig in the sand (floor only)
+    PERCH_DANGLE = "perch_dangle"  # Sit at the end of the title bar, legs dangling over its edge
+    PERCH_PEER = "perch_peer"      # Lean over the title bar to peer into the window at the cursor
+    WALL_SCRATCH = "wall_scratch"  # Scratch at a screen wall / drum on the side of Claude's window
 
     @property
     def animation_name(self) -> str:

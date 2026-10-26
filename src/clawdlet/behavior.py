@@ -13,6 +13,7 @@ from clawdlet.behavior_table import (
     BehaviorRow,
     BehaviorSelector,
     BehaviorTable,
+    FidgetRow,
     IdleContext,
     load_bundled_behavior_table,
 )
@@ -40,11 +41,21 @@ from clawdlet.work_session import PHASE_JUGGLE, PHASE_TYPING, WorkDirective, Wor
 # Offsets of the side random streams from ``rng_seed`` (keeps them apart from ``_rng``)
 _WORK_RNG_OFFSET = 7919
 _BEHAVIOR_RNG_OFFSET = 104729
+_FIDGET_RNG_OFFSET = 15485863
 
 # Spot detection for the behavior table's ``when.spot``
 _SCREEN_EDGE_PX = 4.0
 _WINDOW_SIDE_PX = 8.0
 _PERCH_EDGE_FRACTION = 0.25  # Of the body width, from either end of the title bar
+
+# Strips drawn lower than the body box (sprite px of 64): legs / head hang over the title bar's
+# edge while the physics body stays on top of it
+_RENDER_DY_SPRITE_PX = {"perch_dangle": 8, "perch_peer": 10}
+
+# Gaze strip poses used outside the 3x3 look grid
+_GAZE_AHEAD = 4
+_GAZE_DOWN = 7
+_GAZE_BLINK = 9
 
 # Animation names the controller renders instead of ``state.animation_name`` (a test checks that
 # every one of them is in the sprite manifest, so SpriteSheetBank never silently falls back)
@@ -60,8 +71,22 @@ RENDER_OVERRIDE_ANIMATIONS = (
 )
 
 
+# Table-driven idle actions (L2 idle and position-aware actions). They rest like IDLE: they may
+# doze off, pounce, start work, and decide on a new activity when their timer runs out.
+_IDLE_ACTION_STATES = frozenset({
+    PetState.READ_SCROLL,
+    PetState.POLISH_CLAW,
+    PetState.DIG_SAND,
+    PetState.PERCH_DANGLE,
+    PetState.PERCH_PEER,
+    PetState.WALL_SCRATCH,
+})
+
 # Resting states that may doze off, pounce, or decide on a new activity
-_REST_STATES = frozenset({PetState.IDLE, PetState.BLOB, PetState.PERCH_CLAUDE})
+_REST_STATES = frozenset({PetState.IDLE, PetState.BLOB, PetState.PERCH_CLAUDE, *_IDLE_ACTION_STATES})
+
+# Resting states that idly glance around and blink (L1 fidgets, cosmetic only)
+_FIDGET_STATES = frozenset({PetState.IDLE, PetState.PERCH_CLAUDE})
 
 # Timer-driven reactions that stand still on the floor or on Claude Desktop's top border
 _STATIONARY_STATES = frozenset({
@@ -94,6 +119,7 @@ _WORK_ENTRY_STATES = frozenset({
     PetState.SLEEP,
     PetState.WAKE_STARTLE,
     PetState.PUSH_WINDOW,
+    *_IDLE_ACTION_STATES,
 })
 
 # Short breaks between typing segments (laptop stays out). Add new break states here.
@@ -129,6 +155,7 @@ _PERCH_TICK_STATES = frozenset({
     PetState.WANDER,
     PetState.BLOB,
     PetState.CHASE_CURSOR,
+    *_IDLE_ACTION_STATES,
     *_LAPTOP_STATES,
     *_STATIONARY_STATES,
 })
@@ -324,6 +351,17 @@ class ClawdletController:
         self._selector = BehaviorSelector(self.behavior_table, self._behavior_rng)
         self._active_row: BehaviorRow | None = None   # Row that started the current state (chains)
         self._active_row_state: PetState | None = None
+        # After a wall_bump / window_side row: turn away from the wall, or climb Claude's window
+        self._turn_after_scratch: bool = False
+        self._climb_after_scratch: bool = False
+        self._scratch_state: PetState | None = None
+        # L1 fidgets (glances, blinks): cosmetic, so their own stream (never ``_rng``)
+        self._fidget_rng = random.Random(None if rng_seed is None else rng_seed + _FIDGET_RNG_OFFSET)
+        self._fidget_next_at: float = 0.0  # 0 = not scheduled yet
+        self._fidget_steps: tuple[tuple[int, float], ...] = ()
+        self._fidget_started_at: float = 0.0
+        # Debug hook: times tick() fell back to IDLE for a state no branch handles (tests assert 0)
+        self.unhandled_state_resets: int = 0
 
         # Work sessions (typing segments, breaks, heuristic cap) draw from their own stream
         self._work_rng = random.Random(None if rng_seed is None else rng_seed + _WORK_RNG_OFFSET)
@@ -1266,12 +1304,65 @@ class ClawdletController:
             self._gaze_blink_until = self._clock + self.GAZE_BLINK_S
             self._gaze_next_blink_at = self._clock + self._fx_rng.uniform(3.0, 5.0)
         if self._clock < self._gaze_blink_until:
-            return 9
+            return _GAZE_BLINK
+        return self._gaze_index(dx, dy)
+
+    def _gaze_index(self, dx: float, dy: float) -> int:
+        """Gaze strip pose for a look along (dx, dy) from the eyes: ``(qy + 1) * 3 + (qx + 1)``."""
         dead_x = self.body.width * 0.35
         dead_y = self.body.height * 0.35
         qx = 0 if abs(dx) < dead_x or abs(dy) > 2.0 * abs(dx) else (1 if dx > 0 else -1)
         qy = 0 if abs(dy) < dead_y or abs(dx) > 2.0 * abs(dy) else (1 if dy > 0 else -1)
         return (qy + 1) * 3 + (qx + 1)
+
+    def _fidget_frame(self, win: WindowSnapshot | None) -> int | None:
+        """L1 idle: now and then glance around or blink while resting (gaze strip pose, or None).
+
+        Every ``uniform(*settings.fidget_interval_s)`` seconds a ``fidgets`` row is picked and its
+        pose script played. Purely cosmetic: draws only ``_fidget_rng``, never changes the state.
+        """
+        if self.state not in _FIDGET_STATES:
+            self._fidget_steps = ()
+            self._fidget_next_at = 0.0  # Rescheduled when Clawd settles down again
+            return None
+        lo_s, hi_s = self.behavior_table.settings.fidget_interval_s
+        if self._fidget_steps:
+            t = self._clock - self._fidget_started_at
+            for index, hold_s in self._fidget_steps:
+                if t < hold_s:
+                    return index
+                t -= hold_s
+            self._fidget_steps = ()
+            self._fidget_next_at = self._clock + self._fidget_rng.uniform(lo_s, hi_s)
+            return None
+        if self._fidget_next_at <= 0.0:
+            self._fidget_next_at = self._clock + self._fidget_rng.uniform(lo_s, hi_s)
+            return None
+        if self._clock < self._fidget_next_at:
+            return None
+        perched = self._perched_hwnd is not None
+        row = self._selector.pick_fidget(
+            self._idle_context(win, perched=perched, trigger="fidget"), self._fidget_rng
+        )
+        if row is None:
+            self._fidget_next_at = self._clock + self._fidget_rng.uniform(lo_s, hi_s)
+            return None
+        self._fidget_steps = self._fidget_script(row, win)
+        self._fidget_started_at = self._clock
+        return self._fidget_steps[0][0]
+
+    def _fidget_script(self, row: FidgetRow, win: WindowSnapshot | None) -> tuple[tuple[int, float], ...]:
+        if row.target is None:
+            return row.poses
+        hold_s = self._fidget_rng.uniform(*row.hold_s)
+        index = _GAZE_AHEAD
+        if row.target == "claude_window" and win is not None and win.is_perchable:
+            if self._perched_hwnd is not None:
+                index = _GAZE_DOWN  # Sitting on it: look down at the chat
+            else:
+                eye_y = self.body.y + self.body.height * 0.36
+                index = self._gaze_index(win.rect.center_x - self.body.center_x, win.rect.center_y - eye_y)
+        return ((index, hold_s),)
 
     # --- Milestone 6: data-driven idle choices (behavior table) ---------------------------------
 
@@ -1361,10 +1452,11 @@ class ClawdletController:
         self._state_timer = 0.0
         self._decision_duration = self._rng.uniform(lo_s, hi_s) * self.profile.rest_duration_multiplier
 
-    def _start_row(self, row: BehaviorRow) -> None:
-        """Enter a table row's state; exactly one ``_rng.uniform`` call, like the code it replaced."""
+    def _start_row(self, row: BehaviorRow, rng: random.Random | None = None) -> None:
+        """Enter a table row's state; exactly one ``uniform`` call on ``rng`` (default ``_rng``,
+        like the rest-decision code it replaced; trigger hooks pass ``_behavior_rng``)."""
         lo_s, hi_s = row.duration_s or (2.2, 4.0)  # The loader requires duration_s on behavior rows
-        duration = self._rng.uniform(lo_s, hi_s)
+        duration = (rng or self._rng).uniform(lo_s, hi_s)
         if row.scale_by_rest:
             duration *= self.profile.rest_duration_multiplier
         self.state = PetState[row.state]
@@ -1372,6 +1464,61 @@ class ClawdletController:
         self._decision_duration = duration
         self._active_row = row
         self._active_row_state = self.state
+        if self.state in _IDLE_ACTION_STATES:
+            self.body.vx = 0.0
+        if self.state == PetState.PERCH_DANGLE:
+            self._snap_to_perch_end()
+
+    def _snap_to_perch_end(self) -> None:
+        """PERCH_DANGLE: shuffle to the nearer end of the title bar and face out over it."""
+        win = self._last_win
+        if self._perched_hwnd is None or win is None or not win.is_perchable:
+            return
+        max_offset = max(0.0, win.rect.width - self.body.width)
+        at_left = self._perch_offset_x <= max_offset * 0.5
+        self._perch_offset_x = 0.0 if at_left else max_offset
+        self.body.x = win.rect.left + self._perch_offset_x
+        self.facing = -1 if at_left else 1
+
+    def _start_trigger_row(self, trigger: str, win: WindowSnapshot | None, wall_side: int) -> bool:
+        """``on: wall_bump`` / ``on: window_side`` rows: maybe stop and face the wall for a while.
+
+        Draws only ``_behavior_rng`` (chance roll and duration), so the FSM's ``_rng`` sequence
+        is the same whether or not a row fires. Return True when a row was started.
+        """
+        row = self._selector.pick(trigger, self._idle_context(win, perched=False, trigger=trigger))
+        if row is None:
+            return False
+        self._start_row(row, rng=self._behavior_rng)
+        self.facing = wall_side
+        self.body.vx = 0.0
+        self._seeking_claude = False
+        self._scratch_state = self.state
+        self._turn_after_scratch = trigger == "wall_bump"
+        self._climb_after_scratch = trigger == "window_side"
+        return True
+
+    def _climb_claude_or_scratch(self, win: WindowSnapshot, wall_side: int) -> None:
+        """At the side of Claude's window: maybe drum on it first (``window_side``), else climb."""
+        if not self._start_trigger_row("window_side", win, wall_side):
+            self._start_climb_claude(win, wall_side)
+
+    def _finish_floor_rest(self, win: WindowSnapshot | None) -> None:
+        """A floor rest / idle action ran out: follow up a wall scratch, else decide anew."""
+        if self._climb_after_scratch:
+            self._climb_after_scratch = False
+            if self._is_claude_climbable(win):
+                assert win is not None
+                target_x, wall_side = self._choose_claude_climb_x(win.rect)
+                if abs(self.body.x - target_x) <= 6.0:
+                    self._active_row = None
+                    self.body.x = target_x
+                    self._start_climb_claude(win, wall_side)
+                    return
+        elif self._turn_after_scratch:
+            self._turn_after_scratch = False
+            self.facing = -self.facing
+        self._transition_from_floor_rest(win)
 
     def _transition_from_floor_rest(self, win: WindowSnapshot | None) -> None:
         """Choose next autonomous state when IDLE, BLOB, or TYPING timer expires on the floor."""
@@ -1405,7 +1552,7 @@ class ClawdletController:
             target_x, wall_side = self._choose_claude_climb_x(win.rect)
             if abs(self.body.x - target_x) <= 6.0:
                 self.body.x = target_x
-                self._start_climb_claude(win, wall_side)
+                self._climb_claude_or_scratch(win, wall_side)
                 return
             self._seeking_claude = True
             self.facing = 1 if target_x > self.body.x else -1
@@ -1669,6 +1816,11 @@ class ClawdletController:
         render = self._tick(dt, win, pointer)
         if self._active_row is not None and self.state != self._active_row_state:
             self._active_row = None  # Left the table-chosen state: no chain from it
+        if self.state != self._scratch_state:
+            # Interrupted (or done): a later rest must not turn around / climb on its behalf
+            self._turn_after_scratch = False
+            self._climb_after_scratch = False
+            self._scratch_state = None
         return render
 
     def _tick(
@@ -1729,7 +1881,7 @@ class ClawdletController:
 
         # 4. Handle floor WANDER / CHASE horizontal velocity before physics integration
         walk_spd = self.effective_walk_speed
-        if on_floor and self.state in _STATIONARY_STATES:
+        if on_floor and (self.state in _STATIONARY_STATES or self.state in _IDLE_ACTION_STATES):
             self.body.vx = 0.0
         if on_floor and self.state == PetState.CHASE_CURSOR:
             self._step_floor_chase(dt, win)
@@ -1750,7 +1902,7 @@ class ClawdletController:
                 step_dist = walk_spd * dt
                 if abs(dist) <= max(6.0, step_dist * 1.5):
                     self.body.x = target_x
-                    self._start_climb_claude(win, wall_side)
+                    self._climb_claude_or_scratch(win, wall_side)
                     return self._build_render_state(win, win_vel)
                 self.facing = 1 if dist > 0 else -1
             self.body.vx = float(self.facing) * walk_spd
@@ -1841,6 +1993,8 @@ class ClawdletController:
                         self._head_to_peek_edge()
                     elif not self.peek_mode and self._rng.random() < self.effective_wall_climb_chance:
                         self._start_climb_screen_wall(wall_side)
+                    elif not self.peek_mode and self._start_trigger_row("wall_bump", win, wall_side):
+                        pass  # Scratch at the wall (facing it), then turn around
                     else:
                         self.facing = -wall_side
                 elif self._state_timer >= self._decision_duration:
@@ -1859,10 +2013,11 @@ class ClawdletController:
                 PetState.BLOB,
                 PetState.PUT_AWAY_LAPTOP,
                 PetState.KICK_LAPTOP,
-            ):
+            ) or self.state in _IDLE_ACTION_STATES:
                 if self._state_timer >= self._decision_duration:
-                    self._transition_from_floor_rest(win)
+                    self._finish_floor_rest(win)
             else:
+                self.unhandled_state_resets += 1
                 self.state = PetState.IDLE
                 self._state_timer = 0.0
                 self._decision_duration = self._rng.uniform(2.2, 4.0) * rest_mult
@@ -1945,14 +2100,17 @@ class ClawdletController:
         if self.state == PetState.PEEK_EDGE and self._cursor_near(120.0):
             animation_name = "peek_out"
         frame_index = self._gaze_frame(win)
+        if frame_index is None:
+            frame_index = self._fidget_frame(win)
         if frame_index is not None:
             # Gaze poses are drawn facing the viewer; flipping would mirror the look direction
             animation_name = "gaze"
             flip_x = False
+        dy_px = _RENDER_DY_SPRITE_PX.get(animation_name, 0)
 
         return RenderFrameState(
             x=round(self.body.x),
-            y=round(self.body.y),
+            y=round(self.body.y + dy_px * self.body.height / 64.0),
             state=self.state,
             animation_name=animation_name,
             frame_index=frame_index,
