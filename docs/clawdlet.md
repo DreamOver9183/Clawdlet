@@ -54,6 +54,27 @@
    * 當所在視窗突然關閉、最小化，或被使用者用滑鼠抓起放開時，觸發自由落體運動。落地瞬間播放具彈性的「壓扁回彈（Squish & Stretch）」動畫。
 6. **`THROWN / DIZZY`（慣性甩飛與暈眩）**：
    * 當使用者快速拖曳移動 Claude Desktop 視窗（位移速度超過閾值 $v_{\text{threshold}}$），或直接用滑鼠左鍵抓取並甩出時，`Clawdlet` 會脫離視窗邊緣並沿拋物線飛出，落地後冒出小星星進入短暫暈眩狀態。
+7. **`TYPING` 與工作階段（WorkSession，Milestone 6）**：
+   * 「Claude 在工作」的訊號有三種：Claude Desktop 的 I/O 推測（只量 Claude 視窗本身與其網路子程序，雜訊最多）、Claude Code 的 hooks／transcript（`agent_busy`，強訊號）、使用者手動切換（雙擊，強訊號）。
+   * 訊號不直接驅動 FSM，而是先進純邏輯的 `WorkSession`（`work_session.py`），由它發出 `START`／`BREAK`／`RESUME`／`JUGGLE`／`END`／`CAP` 指令；FSM 只在「可進入工作」的狀態（發呆、閒逛、睡覺、傾聽…）收到指令時才掏筆電，反應動作會先播完。
+   * **工作段與休息**：每段打字 安靜 20–40 秒／標準 14–28 秒／過動 8–16 秒，段與段之間從行為表的 `work_breaks` 抽一種 2.5–4.5 秒的休息：`WORK_STRETCH`（伸懶腰）、`WORK_THINK`（托腮「…」）、`WORK_SIP`（喝咖啡）、`WORK_GLANCE`（抬頭看一眼；打字中被戳也是這個）。
+   * **拋球**：有 subagent 在跑時，打字與 `JUGGLE`（拋三顆球）輪流，各 6–10 秒，取代休息。
+   * **上限與冷卻**：只有 I/O 推測訊號時，最多連續打字 60 秒（`CAP`），之後 90 秒不理會推測訊號；hook 送來 DONE 後 8 秒內也忽略 Desktop 的 I/O 尾巴。訊號消失 0.8 秒才算結束。
+   * 其他 Claude Code 反應：`MOLT`（PreCompact 蛻殼，留下會淡出的空殼道具）、`CONFUSED` → `ERROR_SWEAT` → `SAD`（90 秒內工具連續失敗逐級升級）、`ALERT`（「!」10 秒沒人理就改成揮手／敲標題列）、`CELEBRATE`（回合結束）。
+8. **行為設定檔（Shimeji `behaviors.xml` 風格，Milestone 6）**：
+   * 引擎強制的動作（拖曳、掉落、反應、工作、找 Claude、閒逛、送信、登場）留在程式裡，相當於 Shimeji 的 frequency 0；閒置時「接下來做什麼」交給 JSON 行為表（內建 `assets/behaviors/behaviors.default.json`，使用者可用 `%APPDATA%\Clawdlet\behaviors.json` 覆寫）。
+   * 每一列有 `state`、`weight`（Shimeji 的 Frequency，可依模式分開）、`chance`（oneko 式機會觸發，先於加權抽籤單獨擲骰）、`on`（觸發點：`rest`／`wall_bump`／`window_side`）、`when`（surface、spot、mode、idle level、游標是否在視窗內、Claude 是否可見／在前景、前一狀態…）、`duration_s`、`cooldown_s`，以及 `next`＋`next_mode`（Shimeji 的 NextBehavior，`add`／`replace`，最多鏈 4 層）。
+   * 另有 `work_breaks`（工作休息）、`fidgets`（L1 小動作）、`entrances`（登場方式）三個子表與 `settings`（`idle_level2_after_s`、`fidget_interval_s`、`mail_away_s`、`alert_escalate_s`、`work.*`）。
+   * 預設表的權重換算成「舊 roll 單位」，使用者在場時與重構前的機率完全相同（以 golden trace 測試鎖定）；壞掉的列會被丟掉並警告，其餘照用。
+9. **分層閒置與位置感知（Milestone 6）**：
+   * **L1**：休息時偶爾左右張望、眨眼、看向 Claude 視窗（純外觀，不影響 FSM）。
+   * **L2**（使用者 45 秒沒操作）：`READ_SCROLL`（看卷軸，常接著 `POLISH_CLAW` 擦爪子）、`DIG_SAND`（只在地面挖沙）。**L3**（90 秒）：打哈欠 → 睡覺。
+   * **位置動作**：`PERCH_DANGLE`（坐在標題列一端晃腳）、`PERCH_PEER`（游標在視窗內時探頭往下看）、`WALL_SCRATCH`（撞到螢幕邊沒爬上去時抓牆，或走到 Claude 視窗側邊時先敲一敲再爬）。
+10. **登場、道別、送信與傾聽（Milestone 6）**：
+    * **登場 `ENTER_WALK`**（eSheep 的 spawn 表）：啟動與「召喚回畫面中央」時從 `entrances` 抽一種——掉到 Claude 標題列上（5，需看得到視窗；「召喚回中央」不會抽到）、從工作區頂端隨機位置掉下（3）、從螢幕側邊走進來（2）。走進來的那段在物理引擎之前推進，所以不會被牆面 clamp 瞬移進畫面；和其他螢幕相鄰的那一側會跳過（比對 virtual screen）。
+    * **道別 `GOODBYE`**：Tray 的 Exit 先揮手道別（1.2 秒，最多等 2 秒）；在空中、被抓著或爬牆時直接結束，Ctrl+C 與 `--duration` 也立即結束。
+    * **送信 `MAIL_CARRY` → `MAIL_WAIT` → `MAIL_GIVE`**（Desktop Goose 風格）：Claude Code 回合結束時，如果使用者已離開 ≥ `mail_away_s`（30 秒），先不慶祝、改存一封信；使用者回來後 Clawd 帶著信封走到游標附近舉著，點一下就把信交出去，接著把 Claude Desktop 拉到前景並慶祝。開始送信後 90 秒沒人收、或同一個 session 又開始忙，信就作廢。送信優先於打字（拋球除外）。
+    * **傾聽 `LISTEN`**：Claude Desktop 在前景、游標靜止，而使用者的閒置時間卻一再歸零（2 秒內 ≥ 3 次）時，代表正在打字，Clawd 會朝視窗歪頭聽；輸入停下 1.5 秒後恢復。只知道「有輸入發生」，從不讀取按鍵（不用 `GetAsyncKeyState`，也不裝鍵盤 hook）。
 
 ### 3.2 簡化 2D 物理模型
 為確保桌寵移動與拋擲手感自然，渲染迴圈固定於 $\Delta t \approx 16.67\text{ ms}$（即 $60\text{ FPS}$），套用基礎運動學公式：
@@ -142,3 +163,13 @@ directory are provided strictly for personal, non-commercial use.
   * 加入系統工作列圖示（System Tray Icon），支援：一鍵召喚回畫面中央、調整移動活躍度（安靜模式／過動模式）、調整縮放比例（$1\times / 2\times / 3\times$）、穿透鎖定模式（Click-through Mode）。
 * **Milestone 4：GitHub 正式開源發布 (Open Source Release)**
   * 撰寫中英雙語 `README.md`、配置雙重 License 文件、錄製 GIF 實機展示動圖（展示把 `Clawdlet` 甩到 Claude 視窗上的互動過程），並打包首個 Windows Release（`clawdlet.exe` 單檔或安裝包）。
+* **Milestone 5：互動與 Claude Code 連動 (Interactions & Hooks, v0.2.0)**
+  * 游標感知（眼睛跟著看、追游標、過動模式撲擊）、戳／摸／連點、作息與睡眠、邊緣躲藏、允許推視窗，以及 Claude Code `http` hooks 接收器、零設定的 transcript 監看與一鍵安裝 hooks。
+* **Milestone 6：修正「一直打字」＋ 更豐富的動作與互動 (v0.3.0)**
+  * **Phase 1 — 偵測修正**：「思考中」只量 Claude 視窗那棵 process 樹（主程序＋網路服務子程序，逐 process 計算 delta、讀不到 cmdline 就跳過），門檻提高到 8 KB/s；transcript 的 slash 指令、`isMeta`、中斷、compact 不再算忙碌；hook 的 `notification_type` 讓權限提示時停止打字。
+  * **Phase 2 — WorkSession**：打字改成有休息的工作段，只有 I/O 推測訊號時 60 秒上限＋90 秒冷卻，不再每幀強制打字。
+  * **Phase 3 — `behaviors.json`**：閒置選擇改由外部 JSON 行為表決定（權重、條件、機會觸發、鏈結、冷卻），附 JSON Schema、使用者覆寫檔、「重新載入行為設定」與 `--dump-behaviors`；以 golden trace 鎖定重構前後行為一致。
+  * **Phase 4 — 活動感知動作**：工作休息（伸懶腰／托腮／喝咖啡）、subagent 拋球、PreCompact 蛻殼、警示揮手升級、錯誤連鎖（困惑 → 冒汗 → 沮喪），以及「更新 hooks」偵測。
+  * **Phase 5 — 分層閒置與位置感知**：L1 張望眨眼、L2 看卷軸／擦爪子／挖沙、標題列晃腳與探頭、抓牆與敲視窗。
+  * **Phase 6 — 登場／道別／送信／傾聽**：三種登場方式（避開相鄰螢幕的一側）、Exit 揮手道別、離開時送信（點信封會把 Claude Desktop 拉到前景）、打字時歪頭傾聽（不讀按鍵）；CLI `--no-mail`／`--no-listen` 與對應的 Tray 開關。
+  * **致謝與參考專案**：行為表與 NextBehavior 鏈結參考 **Shimeji-ee**；警示的 GetAttention → Continued → Return 升級參考 **Microsoft Agent**；機會觸發的小動作與追游標參考 **oneko**；登場 spawn 表參考 **eSheep**；L2 動作的 Start → Loop 分段動畫參考 **VPet**；Claude Code hook 連動與狀態對應參考 **clawd-on-desk**；送信參考 **Desktop Goose**。以上皆只參考設計概念，未使用其程式碼或素材。

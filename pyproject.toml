@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawdlet"
-version = "0.2.0"
+version = "0.3.0"
 description = "Clawdlet — An unofficial, fan-made physics desktop pet that perches on your Claude Desktop window."
 readme = "README.md"
 requires-python = ">=3.11"
