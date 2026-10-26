@@ -53,7 +53,13 @@ from clawdlet.tray import (
     confirm_dialog,
     copy_text_to_clipboard,
 )
-from clawdlet.window_tracker import Win32ClaudeTracker, get_physical_work_area, nudge_window
+from clawdlet.window_tracker import (
+    ROLE_NETWORK,
+    ThinkingSample,
+    Win32ClaudeTracker,
+    get_physical_work_area,
+    nudge_window,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -155,6 +161,23 @@ def _enable_per_monitor_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def format_thinking_sample(sample: ThinkingSample, min_active: int) -> str:
+    """--debug line for the Claude Desktop I/O heuristic, one ``role=pid:rate`` entry per process."""
+    parts = ["io"]
+    if sample.main_pid is None:
+        parts.append("main=none")
+    for proc in sample.procs:
+        role = "net" if proc.role == ROLE_NETWORK else proc.role
+        first = "(first)" if proc.first_sample else ""
+        parts.append(f"{role}={proc.pid}:{proc.io_rate / 1024.0:.1f}KB/s{first}")
+    parts.append(f"total={sample.io_rate / 1024.0:.1f}KB/s")
+    if sample.skipped:
+        parts.append(f"skipped={sample.skipped}")
+    parts.append(f"active={sample.active_samples}/{min_active}")
+    parts.append(f"thinking={sample.is_thinking}")
+    return " ".join(parts)
 
 
 def sync_tray_state(tray_state: TrayMenuState, controller: ClawdletController) -> None:
@@ -461,7 +484,10 @@ def main(argv: list[str] | None = None) -> int:
             except queue.Empty:
                 break
             if overlay.debug:
-                print(f"[Clawdlet] agent event={agent_event.value} source={source}")
+                print(
+                    f"[Clawdlet] agent event={agent_event.value} "
+                    f"session={session_id[:8]} source={source}"
+                )
             controller.handle_agent_event(agent_event, session_id, source)
 
         render_state = None
@@ -484,13 +510,11 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         sample = tracker.last_thinking_sample
-        if overlay.debug and sample is not None and (now - last_sample_log_time) >= 2.0:
+        if overlay.debug and (now - last_sample_log_time) >= 2.0:
             last_sample_log_time = now
-            print(
-                f"[Clawdlet] thinking-sample procs={sample.proc_count} "
-                f"cpu={sample.cpu_rate:.2f} io={sample.io_rate / 1024.0:.1f}KB/s "
-                f"active={sample.active_samples} thinking={sample.is_thinking}"
-            )
+            if sample is not None:
+                print(f"[Clawdlet] {format_thinking_sample(sample, tracker.cfg.thinking_min_active)}")
+            print(f"[Clawdlet] agent {controller.agent.describe(controller.clock)}")
 
         root.after(12, _on_tick)
 

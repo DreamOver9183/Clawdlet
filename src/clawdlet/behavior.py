@@ -139,6 +139,7 @@ class WindowSnapshot:
     visible: bool = True
     is_thinking: bool = False
     maximized: bool = False
+    foreground: bool = False  # Claude Desktop is the active (foreground) window
 
     @property
     def is_perchable(self) -> bool:
@@ -483,17 +484,20 @@ class ClawdletController:
         """React to a Claude Code activity event (busy typing is picked up through ``_is_thinking``).
 
         Hooks are authoritative: once a session has sent a hook event, transcript-derived events
-        for it are dropped so the two sources can never double-celebrate or flip-flop.
+        for it are dropped so the two sources can never double-celebrate or flip-flop. The one
+        exception is INTERRUPTED, which only the transcript can see (no Stop hook fires on Esc).
         """
         if source == HOOK_SOURCE:
             self.agent.hook_sessions.add(session_id)
-        elif session_id in self.agent.hook_sessions:
+        elif session_id in self.agent.hook_sessions and event != AgentEvent.INTERRUPTED:
             return
+        if event == AgentEvent.COMPACT:
+            return  # Not acted on yet
         win = self._last_win
-        was_busy = self.agent.note(event, session_id, self._clock)
+        was_busy = self.agent.note(event, session_id, self._clock, source)
 
         # Any follow-up from the session that raised the alert means it is no longer waiting
-        if event != AgentEvent.ATTENTION and session_id == self._alert_session:
+        if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING) and session_id == self._alert_session:
             self._alert_session = None
             if self.state == PetState.ALERT:
                 self._return_to_rest(win)
@@ -514,6 +518,11 @@ class ClawdletController:
                 self._set_state(PetState.CELEBRATE)
             else:
                 self._pending_celebrate = True
+        elif event == AgentEvent.INTERRUPTED and was_busy:
+            # Like DONE, minus the victory dance (WAITING needs nothing: the session just stops
+            # counting as busy, so typing winds down on its own)
+            if self.state == PetState.TYPING and not self._is_thinking(win):
+                self._start_stop_typing()
 
     def begin_drag(self, cursor_x: float, cursor_y: float) -> None:
         """Grab Clawdlet with the left mouse button."""
@@ -665,6 +674,11 @@ class ClawdletController:
         self._decision_duration = 6.0
 
     # --- Milestone 5: shared reaction plumbing --------------------------------------------------
+
+    @property
+    def clock(self) -> float:
+        """Simulation time in seconds (the clock agent events are stamped with)."""
+        return self._clock
 
     def _is_thinking(self, win: WindowSnapshot | None) -> bool:
         """Claude Desktop heuristic thinking (tracker) or a busy Claude Code session (hooks)."""

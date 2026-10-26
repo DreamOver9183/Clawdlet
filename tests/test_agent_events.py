@@ -61,6 +61,27 @@ def test_map_hook_payload_rejects_unknown_and_malformed() -> None:
     assert map_hook_payload({"hook_event_name": "Stop"}) == (AgentEvent.DONE, "default")
 
 
+@pytest.mark.parametrize(
+    ("notification_type", "expected"),
+    [
+        ("permission_prompt", AgentEvent.ATTENTION),
+        ("elicitation_dialog", AgentEvent.ATTENTION),
+        ("something_new", AgentEvent.ATTENTION),  # unknown types keep the old behaviour
+        (None, AgentEvent.ATTENTION),
+        ("idle_prompt", None),
+        ("auth_success", None),
+    ],
+)
+def test_notification_type_filters_quiet_notifications(notification_type, expected) -> None:
+    payload = {"hook_event_name": "Notification", "session_id": "s1", "message": "stub"}
+    if notification_type is not None:
+        payload["notification_type"] = notification_type
+    assert map_hook_payload(payload) == (None if expected is None else (expected, "s1"))
+    # Only Notification is filtered; the field means nothing on other events
+    assert map_hook_payload({"hook_event_name": "Stop", "notification_type": "idle_prompt"}) == (
+        AgentEvent.DONE, "default")
+
+
 def test_agent_activity_busy_lifecycle_and_expiry() -> None:
     act = AgentActivity(busy_expiry_s=180.0)
     assert act.busy(0.0) is False
@@ -73,6 +94,37 @@ def test_agent_activity_busy_lifecycle_and_expiry() -> None:
     act.note(AgentEvent.BUSY, "c", 300.0)
     act.note(AgentEvent.FAILED, "c", 301.0)
     assert act.busy(301.0) is False
+
+
+def test_agent_activity_waiting_sessions_are_not_busy() -> None:
+    act = AgentActivity(busy_expiry_s=180.0)
+    act.note(AgentEvent.BUSY, "a", 0.0)
+    assert act.note(AgentEvent.ATTENTION, "a", 1.0) is True  # permission prompt: stop typing
+    assert act.busy(2.0) is False
+    assert act.note(AgentEvent.BUSY, "a", 3.0) is False  # approved: back to work
+    assert act.busy(3.0) is True
+    act.note(AgentEvent.WAITING, "a", 4.0, "transcript")
+    assert act.busy(4.0) is False
+    assert act.sessions["a"].phase == "waiting"
+    assert act.busy(500.0) is False and act.sessions == {}  # waiting sessions expire too
+
+    act.note(AgentEvent.BUSY, "b", 600.0)
+    act.note(AgentEvent.INTERRUPTED, "b", 601.0)
+    assert "b" not in act.sessions
+    act.note(AgentEvent.ATTENTION, "c", 602.0)
+    act.note(AgentEvent.END, "c", 603.0)
+    assert act.sessions == {}
+
+
+def test_agent_activity_describe() -> None:
+    act = AgentActivity(busy_expiry_s=180.0)
+    assert act.describe(0.0) == "busy=[] waiting=[]"
+    act.note(AgentEvent.BUSY, "3f2a91c0-aaaa-bbbb", 0.0)
+    act.note(AgentEvent.WAITING, "77e0d1b2-cccc", 40.0, "transcript")
+    act.note(AgentEvent.SUBAGENT_START, "subby", 41.0)
+    assert act.describe(42.0) == (
+        "busy=[3f2a91c0 hook 42s, subby hook 1s sub=1] waiting=[77e0d1b2 transcript 2s]"
+    )
 
 
 def test_hook_settings_snippet_shape() -> None:
@@ -134,6 +186,8 @@ def test_server_accepts_authorized_event(server) -> None:
 def test_server_ignores_unknown_events_with_200(server) -> None:
     srv, events = server
     assert _post(srv.port, b'{"hook_event_name": "PreCompact"}') == 200
+    body = b'{"hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "x"}'
+    assert _post(srv.port, body) == 200
     assert events.empty()
 
 
@@ -168,6 +222,8 @@ def test_oversized_tool_payload_is_drained_and_still_mapped(server) -> None:
 def test_scan_payload_head_extracts_common_fields() -> None:
     head = b'{"session_id": "abc-1", "hook_event_name":"Stop", "cwd": "C:/x"'
     assert scan_payload_head(head) == {"session_id": "abc-1", "hook_event_name": "Stop"}
+    head = b'{"session_id": "n", "hook_event_name": "Notification", "notification_type": "idle_prompt"'
+    assert scan_payload_head(head)["notification_type"] == "idle_prompt"
     assert scan_payload_head(b'{"tool_input": "nothing here"') == {}
 
 
@@ -327,3 +383,46 @@ def test_agent_events_ignored_while_airborne() -> None:
     ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")
     ctrl.handle_agent_event(AgentEvent.ERROR, "s")
     assert ctrl.state == PetState.FALLING
+
+
+def test_attention_stops_typing_without_celebrating() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s")
+    assert _run(ctrl, 0.5)[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.ATTENTION, "s")  # permission prompt
+    assert ctrl.agent.busy(ctrl.clock) is False
+    ctrl._set_state(PetState.IDLE)  # acknowledge the alert
+    states = _run(ctrl, 2.0)
+    assert PetState.TYPING not in states and PetState.CELEBRATE not in states
+
+
+def test_transcript_interrupt_is_accepted_for_hook_sessions() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s", "hook")
+    assert _run(ctrl, 0.5)[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.BUSY, "s", "transcript")  # other transcript events: dropped
+    ctrl.handle_agent_event(AgentEvent.INTERRUPTED, "s", "transcript")  # Esc: no Stop hook fires
+    assert ctrl.state == PetState.PUT_AWAY_LAPTOP
+    assert ctrl.agent.busy(ctrl.clock) is False
+    states = _run(ctrl, ClawdletController.PUT_AWAY_DURATION_S + ClawdletController.CELEBRATE_DURATION_S + 0.5)
+    assert PetState.CELEBRATE not in states
+    assert PetState.TYPING not in states
+
+
+def test_transcript_waiting_winds_typing_down_without_celebrating() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.BUSY, "t", "transcript")
+    assert _run(ctrl, 0.5)[-1] == PetState.TYPING
+    ctrl.handle_agent_event(AgentEvent.WAITING, "t", "transcript")
+    states = _run(ctrl, 3.0)
+    assert PetState.PUT_AWAY_LAPTOP in states
+    assert PetState.CELEBRATE not in states
+    ctrl.handle_agent_event(AgentEvent.DONE, "t", "transcript")  # finishing after a wait: no party
+    assert PetState.CELEBRATE not in _run(ctrl, 2.0)
+
+
+def test_compact_events_are_ignored_for_now() -> None:
+    ctrl = _floor()
+    ctrl.handle_agent_event(AgentEvent.COMPACT, "t", "transcript")
+    assert ctrl.state == PetState.IDLE
+    assert ctrl.agent.sessions == {}

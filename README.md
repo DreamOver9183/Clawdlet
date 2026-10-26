@@ -15,7 +15,7 @@ let clawd = new WindowCompanion({ gravity: true });
 ## ✨ Core Features | 核心特色
 
 ### 1. Window-Aware Claude Desktop Perching | 專屬視窗感知與標題列吸附
-- **DWM Frame Tracking**: Automatically detects your active `Claude.exe` main window (supporting both Windows Store MSIX & standard Squirrel installs while filtering out background `claude-code` CLI processes) via `DWMWA_EXTENDED_FRAME_BOUNDS` with **0px gap** perching.
+- **DWM Frame Tracking**: Automatically detects your active `Claude.exe` main window (supporting both Windows Store MSIX & standard Squirrel installs while filtering out background `claude-code` CLI processes) via `DWMWA_EXTENDED_FRAME_BOUNDS` with **0px gap** perching. Its "thinking" heuristic only measures the I/O of the Claude window's own process and its network-service helper (sustained ≥ 8 KB/s), never renderers, the GPU process, node/MCP helpers or a terminal Claude Code. | 「思考中」只量 Claude 視窗本身與其網路子程序的 I/O。
 - **Autonomous Climbing & Strolling**: Clawdlet actively walks across your taskbar, climbs vertically up the side of your Claude Desktop window, and perches on top of the titlebar to peek down at your conversation.
 - **Dynamic Window Physics**:
   - Smoothly follows the window when you drag Claude Desktop at normal speed.
@@ -55,13 +55,14 @@ Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://cod
 
 Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Code 分頁都適用）:
 
-1. **Zero-config (default) | 零設定**: Clawdlet watches recently active Claude Code session transcripts (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR`) and reacts with typing and a victory dance. It only reads the record *types* near the end of each file (`api-request`, `tool_use`, `end_turn`…), never their content. It cannot see permission prompts (no `!`), and the transcript format is internal to Claude Code, so it is best-effort. Disable with `--no-transcript-watch`.
+1. **Zero-config (default) | 零設定**: Clawdlet watches recently active Claude Code session transcripts (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR`) and reacts with typing and a victory dance. It only reads the structure of the records near the end of each file — record type / subtype (`api-request`, `tool_use`, `end_turn`, `compact_boundary`…), flags like `isMeta`, and whether a user record *starts with* one of Claude Code's own markers (`<command-name>`, `[Request interrupted by user`…) — never the conversation itself, which is neither stored nor logged. Slash commands don't count as work, pressing Esc puts the laptop away without a victory dance, and a tool call that stays silent for 25 s (most likely a permission prompt) stops the typing. It cannot show the `!` alert, and the transcript format is internal to Claude Code, so it is best-effort. Disable with `--no-transcript-watch`.
+   只讀紀錄的結構（type／subtype、`isMeta` 等旗標，以及使用者紀錄是否以 Claude Code 自己的標記開頭），不讀也不保存對話內容。slash 指令不算工作；按 Esc 中斷會收起筆電但不慶祝；工具呼叫 25 秒沒動靜（多半在等權限確認）就停止打字。
 2. **One-click install | 一鍵安裝（推薦）**: Tray menu → **安裝 Claude Code hooks (Install Hooks)** (asks for confirmation) or `clawdlet --install-hooks`. Clawdlet backs up `~/.claude/settings.json` to `settings.json.clawdlet-bak-<timestamp>`, adds only its own `http` entries pointing at `127.0.0.1`, and leaves everything else untouched. Remove them again from the same tray item or with `clawdlet --uninstall-hooks`.
 3. **Manual | 手動**: Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)** or `clawdlet --print-hook-config`, then merge the `hooks` block yourself.
 
-When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice.
+When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice. The one exception is an Esc interrupt, which fires no hook and is always taken from the transcript. | 同一個 session 以 hooks 為準；只有 Esc 中斷（不會觸發 hook）一律採用 transcript。
 
-The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Clawdlet\hook_token`), reads nothing but `hook_event_name` and `session_id`, never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
+The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Clawdlet\hook_token`), reads nothing but `hook_event_name`, `session_id` and the `notification_type` enum (so `idle_prompt` / `auth_success` notifications don't raise a `!`, and Clawd stops typing while a permission prompt waits for you), never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
 
 ---
 

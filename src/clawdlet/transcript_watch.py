@@ -1,9 +1,14 @@
 """Zero-config Claude Code activity from session transcripts (fallback when hooks aren't installed).
 
 Claude Code (terminal or Claude Desktop's Code tab) appends every turn to
-``<config>/projects/<project>/<session_id>.jsonl``. Only the record *types* near the end of the
-file are read — never their content — to tell whether a session is generating, running a tool,
-or has finished its turn. The format is not a public API, so anything unrecognized yields nothing.
+``<config>/projects/<project>/<session_id>.jsonl``. Only the structure of the records near the end
+of the file is read — their type / subtype, a few boolean flags (``isMeta``, ``isSidechain``,
+``isCompactSummary``) and whether a user record *starts with* one of Claude Code's own markers
+(``<command-name>``, ``[Request interrupted by user`` ...) — never the conversation itself, which is
+neither stored nor logged. From that it tells whether a session is generating, running a tool,
+finished, or was interrupted. A tool call whose transcript stays silent for ``TOOL_WAIT_S`` is
+reported once as WAITING (most likely a permission prompt) and no longer counts as busy.
+The format is not a public API, so anything unrecognized yields nothing.
 """
 
 from __future__ import annotations
@@ -25,21 +30,29 @@ TRACK_WINDOW_S = 600.0      # Only sessions written within the last 10 minutes a
 RESCAN_INTERVAL_S = 5.0
 POLL_INTERVAL_S = 1.0
 BUSY_REFRESH_S = 60.0       # Re-announce BUSY so AgentActivity doesn't expire mid-turn
-BUSY_FRESH_S = 180.0        # ...but only while the transcript itself is still being written
+BUSY_FRESH_S = 90.0         # ...but only while the transcript itself is still being written
 STARTUP_FRESH_S = 30.0      # On first sight, only a just-written busy session counts
+TOOL_WAIT_S = 25.0          # A tool call this quiet is probably waiting on a permission prompt
 SOURCE = "transcript"
 
 _IDLE_STOP_REASONS = frozenset({"end_turn", "stop_sequence", "max_tokens", "refusal"})
+# Turn-ending system records (Stop hooks ran / the conversation was compacted)
+_IDLE_SYSTEM_SUBTYPES = frozenset({"stop_hook_summary", "compact_boundary"})
+# User records written by Claude Code itself for local slash commands: no request follows
+_IDLE_USER_MARKERS = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
+_INTERRUPT_MARKER = "[Request interrupted by user"
+_MARKER_PEEK = 64  # Only this many leading characters are ever compared
 
 
 class TurnPhase(str, Enum):
     GENERATING = "generating"
     TOOL = "tool"
     IDLE = "idle"
+    INTERRUPTED = "interrupted"
 
     @property
     def busy(self) -> bool:
-        return self is not TurnPhase.IDLE
+        return self in (TurnPhase.GENERATING, TurnPhase.TOOL)
 
 
 def claude_config_dir() -> Path:
@@ -64,17 +77,38 @@ def read_tail(path: Path, max_bytes: int = TAIL_BYTES) -> list[bytes]:
     return [line for line in lines if line.strip()]
 
 
+def _leading_text(content: object) -> str:
+    """First characters of a user message (a string, or its first text block) for marker checks."""
+    if isinstance(content, list):
+        content = next(
+            (b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"),
+            None,
+        )
+    return content[:_MARKER_PEEK] if isinstance(content, str) else ""
+
+
 def classify_record(record: object) -> TurnPhase | None:
     """Map one transcript record to a turn phase, or None for metadata / unknown records."""
     if not isinstance(record, dict) or record.get("isSidechain") is True:
         return None
+    if record.get("isMeta") is True:
+        return None  # Injected context (command expansions, caveats), not a turn boundary
     kind = record.get("type")
     if kind == "api-request":
         return TurnPhase.GENERATING
+    if kind == "system":
+        return TurnPhase.IDLE if record.get("subtype") in _IDLE_SYSTEM_SUBTYPES else None
     message = record.get("message")
     if not isinstance(message, dict):
         return None
     if kind == "user":
+        if record.get("isCompactSummary") is True:
+            return TurnPhase.IDLE
+        head = _leading_text(message.get("content"))
+        if head.startswith(_IDLE_USER_MARKERS):
+            return TurnPhase.IDLE
+        if head.startswith(_INTERRUPT_MARKER):
+            return TurnPhase.INTERRUPTED
         return TurnPhase.GENERATING  # A prompt or a tool result: the next request is on its way
     if kind == "assistant":
         stop = message.get("stop_reason")
@@ -100,12 +134,34 @@ def classify_tail(lines: list[bytes]) -> TurnPhase | None:
     return None
 
 
+def latest_compact_marker(lines: list[bytes]) -> str | None:
+    """Identity (uuid / timestamp) of the newest ``compact_boundary`` record in a transcript tail."""
+    for raw in reversed(lines):
+        if b"compact_boundary" not in raw:
+            continue  # Cheap pre-filter: most lines are never parsed here
+        try:
+            record = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("type") == "system"
+            and record.get("subtype") == "compact_boundary"
+            and record.get("isSidechain") is not True
+        ):
+            marker = record.get("uuid") or record.get("timestamp")
+            return marker if isinstance(marker, str) else None
+    return None
+
+
 @dataclass
 class _Tracked:
     size: int
     mtime: float
     phase: TurnPhase | None
     last_busy_emit: float
+    waiting: bool = False             # WAITING was emitted for the current quiet tool call
+    compact_marker: str | None = None
 
 
 class TranscriptWatcher:
@@ -171,19 +227,30 @@ class TranscriptWatcher:
                 continue
             if stat.st_size != st.size or stat.st_mtime != st.mtime:
                 st.size, st.mtime = stat.st_size, stat.st_mtime
-                phase = classify_tail(read_tail(path))
+                lines = read_tail(path)
+                compact = latest_compact_marker(lines)
+                if compact is not None and compact != st.compact_marker:
+                    st.compact_marker = compact
+                    self._emit(AgentEvent.COMPACT, path)
+                phase = classify_tail(lines)
                 if phase is None:
                     continue
                 was_busy = st.phase is not None and st.phase.busy
-                if phase.busy and not was_busy:
+                if phase.busy and (not was_busy or st.waiting):
                     self._emit(AgentEvent.BUSY, path)
                     st.last_busy_emit = now
                 elif not phase.busy and was_busy:
-                    self._emit(AgentEvent.DONE, path)
+                    interrupted = phase is TurnPhase.INTERRUPTED
+                    self._emit(AgentEvent.INTERRUPTED if interrupted else AgentEvent.DONE, path)
                 st.phase = phase
+                st.waiting = False
+            if st.phase is TurnPhase.TOOL and not st.waiting and now - st.mtime >= TOOL_WAIT_S:
+                st.waiting = True
+                self._emit(AgentEvent.WAITING, path)
             if (
                 st.phase is not None
                 and st.phase.busy
+                and not st.waiting
                 and now - st.mtime <= BUSY_FRESH_S
                 and now - st.last_busy_emit >= BUSY_REFRESH_S
             ):
@@ -195,8 +262,15 @@ class TranscriptWatcher:
             stat = path.stat()
         except OSError:
             return
-        phase = classify_tail(read_tail(path))
-        st = _Tracked(size=stat.st_size, mtime=stat.st_mtime, phase=phase, last_busy_emit=float("-inf"))
+        lines = read_tail(path)
+        phase = classify_tail(lines)
+        st = _Tracked(
+            size=stat.st_size,
+            mtime=stat.st_mtime,
+            phase=phase,
+            last_busy_emit=float("-inf"),
+            compact_marker=latest_compact_marker(lines),  # Old compactions are not news
+        )
         if phase is not None and phase.busy and now - stat.st_mtime <= STARTUP_FRESH_S:
             self._emit(AgentEvent.BUSY, path)
             st.last_busy_emit = now

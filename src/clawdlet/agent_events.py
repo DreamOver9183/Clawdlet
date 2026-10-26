@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
@@ -22,7 +23,7 @@ HARD_MAX_BODY_BYTES = 16 * 1024 * 1024  # Larger tool payloads are drained; beyo
 _HEAD_BYTES = 4096
 _HEAD_FIELD_RE = {
     key: re.compile(rb'"' + key.encode() + rb'"\s*:\s*"([^"\\]{1,128})"')
-    for key in ("hook_event_name", "session_id")
+    for key in ("hook_event_name", "session_id", "notification_type")
 }
 DEFAULT_SESSION = "default"
 HOOK_SOURCE = "hook"
@@ -37,6 +38,11 @@ class AgentEvent(str, Enum):
     DONE = "done"            # Turn finished: put the laptop away and celebrate
     FAILED = "failed"        # Turn ended on an API error: sweat, no celebration
     END = "end"              # Session closed
+    WAITING = "waiting"      # A tool call went quiet (likely a permission prompt): not busy
+    INTERRUPTED = "interrupted"  # The user interrupted the turn: put the laptop away, no party
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_STOP = "subagent_stop"
+    COMPACT = "compact"      # The conversation was compacted
 
 
 HOOK_EVENT_MAP: dict[str, AgentEvent] = {
@@ -66,10 +72,13 @@ DEFAULT_HOOK_EVENTS: tuple[str, ...] = (
     "SessionEnd",
 )
 _TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
+# Notification types that do not need the user's attention ("Claude is waiting for your input"
+# fires after a finished turn has sat idle; auth_success just confirms a login)
+_QUIET_NOTIFICATION_TYPES = frozenset({"idle_prompt", "auth_success"})
 
 
 def scan_payload_head(head: bytes) -> dict[str, str]:
-    """Pull ``hook_event_name`` / ``session_id`` out of the first bytes of an oversized payload.
+    """Pull ``hook_event_name`` / ``session_id`` / ``notification_type`` out of an oversized payload's head.
 
     Claude Code sends the common fields before ``tool_input`` / ``tool_response``, so a big
     PostToolUse body still yields its event name without parsing megabytes of tool output.
@@ -83,12 +92,18 @@ def scan_payload_head(head: bytes) -> dict[str, str]:
 
 
 def map_hook_payload(payload: Any) -> tuple[AgentEvent, str] | None:
-    """Map a hook JSON payload to (event, session_id). Only the event name and session id are read."""
+    """Map a hook JSON payload to (event, session_id).
+
+    Only the event name, the session id and the ``notification_type`` enum are read; messages,
+    prompts and tool inputs are never touched.
+    """
     if not isinstance(payload, dict):
         return None
     name = payload.get("hook_event_name")
     event = HOOK_EVENT_MAP.get(name) if isinstance(name, str) else None
     if event is None:
+        return None
+    if name == "Notification" and payload.get("notification_type") in _QUIET_NOTIFICATION_TYPES:
         return None
     session = payload.get("session_id")
     if not isinstance(session, str) or not session:
@@ -96,33 +111,72 @@ def map_hook_payload(payload: Any) -> tuple[AgentEvent, str] | None:
     return event, session[:128]
 
 
+SESSION_BUSY = "busy"
+SESSION_WAITING = "waiting"
+
+
+@dataclass
+class SessionState:
+    """What one Claude Code session is doing, as far as its events tell."""
+
+    phase: str           # SESSION_BUSY or SESSION_WAITING (waiting on the user: not typing)
+    last_t: float        # Time of the session's latest event
+    subagents: int = 0
+    source: str = HOOK_SOURCE
+
+
 class AgentActivity:
-    """Tracks which Claude Code sessions are busy, expiring sessions that went silent."""
+    """Tracks which Claude Code sessions are busy or waiting, expiring sessions that went silent."""
 
     def __init__(self, busy_expiry_s: float = 180.0) -> None:
         self.busy_expiry_s = busy_expiry_s
-        self._busy_since_event: dict[str, float] = {}
+        self.sessions: dict[str, SessionState] = {}
         # Sessions that have delivered real hook events: transcript guesses are ignored for them
         self.hook_sessions: set[str] = set()
 
+    def _expire(self, now: float) -> None:
+        expired = [s for s, st in self.sessions.items() if (now - st.last_t) > self.busy_expiry_s]
+        for s in expired:
+            del self.sessions[s]
+
     def is_session_busy(self, session_id: str, now: float) -> bool:
-        last = self._busy_since_event.get(session_id)
-        return last is not None and (now - last) <= self.busy_expiry_s
+        st = self.sessions.get(session_id)
+        return st is not None and st.phase == SESSION_BUSY and (now - st.last_t) <= self.busy_expiry_s
 
     def busy(self, now: float) -> bool:
-        expired = [s for s, t in self._busy_since_event.items() if (now - t) > self.busy_expiry_s]
-        for s in expired:
-            del self._busy_since_event[s]
-        return bool(self._busy_since_event)
+        self._expire(now)
+        return any(st.phase == SESSION_BUSY for st in self.sessions.values())
 
-    def note(self, event: AgentEvent, session_id: str, now: float) -> bool:
+    def note(self, event: AgentEvent, session_id: str, now: float, source: str = HOOK_SOURCE) -> bool:
         """Record an event; return whether the session was busy just before it."""
         was_busy = self.is_session_busy(session_id, now)
-        if event in (AgentEvent.BUSY, AgentEvent.ERROR):
-            self._busy_since_event[session_id] = now
-        elif event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END):
-            self._busy_since_event.pop(session_id, None)
+        st = self.sessions.get(session_id)
+        if event in (AgentEvent.BUSY, AgentEvent.ERROR, AgentEvent.SUBAGENT_START, AgentEvent.SUBAGENT_STOP):
+            if st is None:
+                st = self.sessions[session_id] = SessionState(SESSION_BUSY, now, source=source)
+            st.phase, st.last_t, st.source = SESSION_BUSY, now, source
+            if event == AgentEvent.SUBAGENT_START:
+                st.subagents += 1
+            elif event == AgentEvent.SUBAGENT_STOP:
+                st.subagents = max(0, st.subagents - 1)
+        elif event in (AgentEvent.ATTENTION, AgentEvent.WAITING):
+            if st is None:
+                st = self.sessions[session_id] = SessionState(SESSION_WAITING, now, source=source)
+            st.phase, st.last_t, st.source = SESSION_WAITING, now, source
+        elif event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END, AgentEvent.INTERRUPTED):
+            self.sessions.pop(session_id, None)
         return was_busy
+
+    def describe(self, now: float) -> str:
+        """One-line summary for --debug, e.g. ``busy=[3f2a91c0 hook 42s] waiting=[]``."""
+        self._expire(now)
+        groups: dict[str, list[str]] = {SESSION_BUSY: [], SESSION_WAITING: []}
+        for session_id, st in self.sessions.items():
+            item = f"{session_id[:8]} {st.source} {max(0.0, now - st.last_t):.0f}s"
+            if st.subagents:
+                item += f" sub={st.subagents}"
+            groups[st.phase].append(item)
+        return " ".join(f"{phase}=[{', '.join(items)}]" for phase, items in groups.items())
 
 
 def default_token_path() -> Path:
