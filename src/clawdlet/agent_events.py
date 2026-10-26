@@ -7,7 +7,6 @@ from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
-import os
 import re
 from pathlib import Path
 import queue
@@ -15,6 +14,8 @@ import secrets
 import socket
 import threading
 from typing import Any
+
+from clawdlet.paths import app_data_dir
 
 DEFAULT_HOOK_PORT = 47821
 HOOK_PATH = "/hook"
@@ -180,8 +181,7 @@ class AgentActivity:
 
 
 def default_token_path() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / "Clawdlet" / "hook_token"
+    return app_data_dir() / "hook_token"
 
 
 def read_token(path: Path | None = None) -> str | None:

@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable
 import ctypes
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import queue
 import sys
@@ -23,11 +24,18 @@ from clawdlet.agent_events import (
 from clawdlet.hook_install import default_settings_path, hooks_installed, install_hooks, uninstall_hooks
 from clawdlet.transcript_watch import TranscriptWatcher
 from clawdlet.behavior import ClawdletController, WindowSnapshot, drop_y_above_window
+from clawdlet.behavior_table import (
+    BehaviorTable,
+    dump_behavior_table,
+    ensure_user_config,
+    load_behavior_table,
+)
 from clawdlet.config import ActivityMode, PhysicsConfig, TrackerConfig
 from clawdlet.geometry import PixelMapper
 from clawdlet.gestures import Gesture
 from clawdlet.input_state import read_pointer_snapshot
 from clawdlet.overlay import ClawdletOverlay
+from clawdlet.paths import app_data_dir
 from clawdlet.physics import PhysicsBody
 from clawdlet.sprites import SpriteSheetBank
 from clawdlet.tray import (
@@ -36,6 +44,8 @@ from clawdlet.tray import (
     CMD_MODE_HYPER,
     CMD_MODE_NORMAL,
     CMD_MODE_QUIET,
+    CMD_OPEN_CONFIG_DIR,
+    CMD_RELOAD_BEHAVIORS,
     CMD_SCALE_1X,
     CMD_SCALE_2X,
     CMD_SCALE_3X,
@@ -144,6 +154,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=argparse.SUPPRESS,  # Alternate settings.json for tests and dry runs
     )
     parser.add_argument(
+        "--behaviors",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Behavior override file to merge over the bundled table "
+        "(default: %%APPDATA%%\\Clawdlet\\behaviors.json).",
+    )
+    parser.add_argument(
+        "--dump-behaviors",
+        action="store_true",
+        help="Print the merged behavior table as JSON (warnings on stderr) and exit.",
+    )
+    parser.add_argument(
         "--duration",
         type=float,
         default=0.0,
@@ -236,6 +259,37 @@ def toggle_hook_install(setup: HookSetup, tray_state: TrayMenuState) -> None:
     tray_state.hooks_status = hooks_status_text(setup, tray_state.hooks_installed)
 
 
+def print_behavior_warnings(table: BehaviorTable) -> None:
+    for warning in table.warnings:
+        print(f"[Clawdlet] behaviors: {warning}", file=sys.stderr)
+
+
+def reload_behaviors(controller: ClawdletController, user_path: Path | None = None) -> BehaviorTable:
+    """Re-read the bundled + user behavior tables and hand the result to the controller."""
+    table = load_behavior_table(user_path)
+    controller.set_behavior_table(table)
+    print(f"[Clawdlet] Behaviors reloaded: {len(table.behaviors)} rows from {table.origin}")
+    print_behavior_warnings(table)
+    return table
+
+
+def _start_file(path: Path) -> None:
+    startfile = getattr(os, "startfile", None)  # Windows only
+    if startfile is not None:
+        startfile(str(path))
+
+
+def open_config_folder(opener: Callable[[Path], None] | None = None) -> Path:
+    """Make sure the config folder has a behaviors.json template, then open it in Explorer."""
+    folder = app_data_dir()
+    ensure_user_config(folder)
+    try:
+        (opener or _start_file)(folder)
+    except OSError as exc:
+        print(f"[Clawdlet] Could not open {folder}: {exc}", file=sys.stderr)
+    return folder
+
+
 def dispatch_tray_action(
     cmd_id: int,
     controller: ClawdletController,
@@ -244,6 +298,8 @@ def dispatch_tray_action(
     latest_win: WindowSnapshot | None,
     hook_config: str | None = None,
     hook_setup: HookSetup | None = None,
+    behaviors_path: Path | None = None,
+    folder_opener: Callable[[Path], None] | None = None,
 ) -> bool:
     """Apply a single tray menu command. Return True if application should exit."""
     if cmd_id == CMD_SUMMON_CENTER:
@@ -287,6 +343,10 @@ def dispatch_tray_action(
     elif cmd_id == CMD_COPY_HOOK_CONFIG:
         if hook_config is not None and copy_text_to_clipboard(hook_config):
             print("[Clawdlet] Claude Code hook settings copied to the clipboard.")
+    elif cmd_id == CMD_RELOAD_BEHAVIORS:
+        reload_behaviors(controller, behaviors_path)
+    elif cmd_id == CMD_OPEN_CONFIG_DIR:
+        open_config_folder(folder_opener)
     elif cmd_id == CMD_EXIT:
         return True
     return False
@@ -305,6 +365,12 @@ def main(argv: list[str] | None = None) -> int:
             result = uninstall_hooks(settings_path)
         print(result.message + (f" (backup: {result.backup})" if result.backup else ""))
         return 0 if result.ok else 1
+    behavior_table = load_behavior_table(args.behaviors)
+    if args.dump_behaviors:
+        print(dump_behavior_table(behavior_table))
+        print_behavior_warnings(behavior_table)
+        return 0
+    print_behavior_warnings(behavior_table)
     _enable_per_monitor_dpi_awareness()
 
     root = tk.Tk()
@@ -342,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         physics_cfg=physics_cfg,
         tracker_cfg=tracker_cfg,
         activity_mode=initial_mode,
+        behavior_table=behavior_table,
     )
     controller.window_nudger = nudge_window
     controller.push_window_enabled = args.allow_window_push
@@ -470,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                 latest_win=win_snap,
                 hook_config=hook_config,
                 hook_setup=hook_setup,
+                behaviors_path=args.behaviors,
             )
             if should_exit:
                 _stop()

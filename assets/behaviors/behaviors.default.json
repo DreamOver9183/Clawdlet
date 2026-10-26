@@ -1,0 +1,87 @@
+{
+  "$schema": "./behaviors.schema.json",
+  "$comment": "Bundled Clawdlet behavior table. Do not edit: put overrides in %APPDATA%\\Clawdlet\\behaviors.json (tray > Open Config Folder). Weights are in 'legacy roll' units: after the engine decides not to wander, the rest of its roll is spread over the eligible rows, so these values reproduce the original thresholds exactly.",
+  "version": 1,
+  "settings": {
+    "idle_level2_after_s": 45.0,
+    "fidget_interval_s": [4.0, 9.0],
+    "mail_away_s": 30.0,
+    "alert_escalate_s": 10.0,
+    "work": {
+      "segment_s": {
+        "quiet": [20.0, 40.0],
+        "normal": [14.0, 28.0],
+        "hyper": [8.0, 16.0]
+      },
+      "break_s": [2.5, 4.5],
+      "heuristic_max_s": 60.0,
+      "heuristic_cooldown_s": 90.0
+    }
+  },
+  "behaviors": [
+    {
+      "id": "floor_blob",
+      "state": "BLOB",
+      "weight": {"quiet": 0.63, "normal": 0.23, "hyper": 0.0},
+      "when": {"surface": ["floor"], "not_prev_state": ["BLOB"]},
+      "duration_s": [2.5, 4.5],
+      "scale_by_rest": true,
+      "description": "Melt into a puddle on the floor (never twice in a row)."
+    },
+    {
+      "id": "floor_idle",
+      "state": "IDLE",
+      "weight": 0.15,
+      "when": {"surface": ["floor"]},
+      "duration_s": [2.2, 4.0],
+      "scale_by_rest": true,
+      "description": "Stand and breathe on the floor."
+    },
+    {
+      "id": "perch_blob",
+      "state": "BLOB",
+      "weight": {"quiet": 0.533, "normal": 0.193, "hyper": 0.0},
+      "when": {"surface": ["perch"], "not_prev_state": ["BLOB", "WANDER"]},
+      "duration_s": [2.4, 4.2],
+      "scale_by_rest": true,
+      "description": "Melt on Claude's title bar when a stroll was possible but not chosen."
+    },
+    {
+      "id": "perch_look_down",
+      "state": "PERCH_CLAUDE",
+      "weight": 0.28,
+      "when": {"surface": ["perch"], "not_prev_state": ["WANDER"]},
+      "duration_s": [3.0, 5.5],
+      "scale_by_rest": true,
+      "description": "Sit on the title bar and peek down at the chat."
+    },
+    {
+      "id": "perch_blob_after_stroll",
+      "state": "BLOB",
+      "weight": 0.72,
+      "when": {"surface": ["perch"], "prev_state": ["WANDER"]},
+      "duration_s": [2.4, 4.2],
+      "scale_by_rest": true,
+      "description": "Melt on the title bar after a stroll along it."
+    },
+    {
+      "id": "perch_look_down_after_stroll",
+      "state": "PERCH_CLAUDE",
+      "weight": 0.28,
+      "when": {"surface": ["perch"], "prev_state": ["WANDER"]},
+      "duration_s": [3.0, 5.5],
+      "scale_by_rest": true,
+      "description": "Sit and peek down at the chat after a stroll along the title bar."
+    }
+  ],
+  "work_breaks": [
+    {
+      "id": "glance",
+      "state": "WORK_GLANCE",
+      "weight": 1.0,
+      "description": "Look up from the laptop for a moment."
+    }
+  ],
+  "fidgets": [],
+  "entrances": []
+}

@@ -31,6 +31,8 @@ CMD_TOGGLE_WINDOW_PUSH = 1042
 CMD_COPY_HOOK_CONFIG = 1051
 CMD_HOOK_STATUS = 1052  # Disabled informational row
 CMD_TOGGLE_HOOK_INSTALL = 1053
+CMD_RELOAD_BEHAVIORS = 1061
+CMD_OPEN_CONFIG_DIR = 1062
 CMD_EXIT = 1099
 
 
@@ -287,6 +289,19 @@ class Win32TrayIcon:
             win32con.MF_STRING,
             CMD_COPY_HOOK_CONFIG,
             "複製 Claude Code hook 設定 (Copy Hook Settings)",
+        )
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
+        win32gui.AppendMenu(
+            menu,
+            win32con.MF_STRING,
+            CMD_RELOAD_BEHAVIORS,
+            "重新載入行為設定 (Reload Behaviors)",
+        )
+        win32gui.AppendMenu(
+            menu,
+            win32con.MF_STRING,
+            CMD_OPEN_CONFIG_DIR,
+            "開啟設定資料夾 (Open Config Folder)",
         )
         win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, "")
 

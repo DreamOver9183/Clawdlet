@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import sys
 
 from PIL import Image
+
+from clawdlet.paths import assets_dir
 
 CHROMA_KEY_RGB = (1, 2, 3)
 CHROMA_KEY_HEX = "#010203"
@@ -15,10 +16,7 @@ CHROMA_KEY_HEX = "#010203"
 
 def default_sprites_dir() -> Path:
     """Resolve the sprites directory in both editable installs and PyInstaller single-file bundles."""
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass is not None:
-        return Path(str(meipass)) / "assets" / "sprites"
-    return Path(__file__).resolve().parents[2] / "assets" / "sprites"
+    return assets_dir() / "sprites"
 
 
 @dataclass(frozen=True)

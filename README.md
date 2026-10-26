@@ -38,6 +38,7 @@ let clawd = new WindowCompanion({ gravity: true });
   - **Pixel-Art Scaling**: `1x (64px)` / `2x (128px)` / `3x (192px)` anchored at feet level
   - **Click-Through Lock (`WS_EX_TRANSPARENT`)**: 100% mouse click pass-through so it never blocks your workflow
   - **Peek from Screen Edge / Allow Window Push / Copy Claude Code Hook Settings** (`邊緣躲藏／允許推視窗／複製 hook 設定`)
+  - **Reload Behaviors / Open Config Folder** (`重新載入行為設定／開啟設定資料夾`) for the [behavior config](#-behavior-config--行為設定檔)
 
 ### 5. Reacts to You | 對你有反應（v0.2.0）
 - **Cursor awareness (`游標感知`)**: Clawd's eyes follow your cursor while it rests, it sometimes trots over to stand under the cursor, and in Hyper mode it **pounces** at a cursor that sits still above its head.
@@ -65,6 +66,32 @@ Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Cod
 When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice. The one exception is an Esc interrupt, which fires no hook and is always taken from the transcript. | 同一個 session 以 hooks 為準；只有 Esc 中斷（不會觸發 hook）一律採用 transcript。
 
 The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Clawdlet\hook_token`), reads nothing but `hook_event_name`, `session_id` and the `notification_type` enum (so `idle_prompt` / `auth_success` notifications don't raise a `!`, and Clawd stops typing while a permission prompt waits for you), never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
+
+---
+
+## 🧩 Behavior Config | 行為設定檔
+
+What Clawd does when it is just hanging around comes from a JSON behavior table (in the spirit of Shimeji's `behaviors.xml`). The bundled `assets/behaviors/behaviors.default.json` reproduces the built-in behavior exactly; your own file **`%APPDATA%\Clawdlet\behaviors.json`** is merged on top of it. Engine-driven moves — being dragged, falling, reactions, typing, seeking Claude, wandering — stay in code; the table decides the idle choice after them.
+閒晃時要做什麼由 JSON 行為表決定。內建的 `behaviors.default.json` 與原本行為完全相同；你的 **`%APPDATA%\Clawdlet\behaviors.json`** 會合併在它上面。拖曳、掉落、反應、打字、找 Claude、閒逛等仍由程式決定，表格只決定之後的閒置動作。
+
+```json
+{
+  "$schema": "./behaviors.schema.json",
+  "version": 1,
+  "extends": "default",
+  "behaviors": [
+    { "id": "floor_blob", "enabled": false },
+    { "id": "perch_look_down", "weight": 0.5, "duration_s": [4, 8] }
+  ]
+}
+```
+
+- **`extends: "default"`** (the default): a row with an existing `id` is patched field by field (a nested `when` / `next` / `weight` object is replaced as a whole), new ids are appended, and `settings` are deep-merged. **`extends: "none"`** replaces the bundled table. | 同 `id` 逐欄覆寫（巢狀的 `when` 整個取代）、新 `id` 附加；`none` 則整份取代。
+- **Rows | 欄位**: `state` (`IDLE`, `BLOB`, `PERCH_CLAUDE` for now), `weight` (number or `{"quiet", "normal", "hyper"}`), optional `chance` (rolled on its own before the weighted pick), `when` (`surface`, `spot`, `mode`, idle level, `user_idle_s`, `claude_visible` / `claude_foreground`, `cursor_in_window`, `prev_state` / `not_prev_state`), `duration_s`, `scale_by_rest`, `cooldown_s`, `next` + `next_mode` (`add` / `replace`, up to 4 steps), `enabled`, `description`. `settings.work` sets the typing segment / break lengths.
+- **Errors are forgiving | 容錯**: an invalid row is dropped with a warning naming it and the rest still load; a file that is not valid JSON or has the wrong `version` is ignored with one message (`[Clawdlet] behaviors.json: … — using defaults`).
+- **Tray | 系統匣**: **重新載入行為設定 (Reload Behaviors)** applies your edits without restarting; **開啟設定資料夾 (Open Config Folder)** creates an empty `behaviors.json` template (plus a copy of `behaviors.schema.json`) if missing and opens the folder.
+- **Autocompletion | 自動補完**: keep `"$schema": "./behaviors.schema.json"` and VS Code offers every key and value while you type.
+- **CLI**: `clawdlet --dump-behaviors` prints the merged table (what Clawd actually uses) and any warnings; `clawdlet --behaviors PATH` loads a different override file.
 
 ---
 
@@ -102,6 +129,8 @@ clawdlet --print-hook-config               # Print the Claude Code hooks block f
 clawdlet --hook-port 47821                 # Port for the Claude Code hook receiver (default 47821)
 clawdlet --no-hooks                        # Don't start the hook receiver
 clawdlet --allow-window-push               # Hyper mode may nudge the Claude window a few px (off by default)
+clawdlet --behaviors D:\my-behaviors.json  # Merge this behavior file instead of %APPDATA%\Clawdlet\behaviors.json
+clawdlet --dump-behaviors                  # Print the merged behavior table as JSON (warnings on stderr) and exit
 clawdlet-dump-windows                      # Diagnostic tool to inspect detected Claude.exe HWNDs
 python -m clawdlet.tools.send_hook_event Stop   # Dev: send a fake hook event to a running Clawdlet
 ```
@@ -129,7 +158,7 @@ python -m clawdlet.tools.build_exe
 | **Right-Click on Pet** | Playful Hop | 右鍵點擊角色觸發原地開心跳躍 |
 | **Leave the PC (90 s)** | Sleep | 90 秒沒碰鍵盤滑鼠就打哈欠睡著，一動就驚醒 |
 | **Double-Click Tray Icon** | Summon to Center | 左鍵雙擊右下角系統匣圖示，立即將 Clawdlet 召喚回螢幕中央 |
-| **Right-Click Tray Icon** | Open Control Menu | 右鍵點擊系統匣圖示，切換「安靜／標準／過動模式」、「1x/2x/3x 縮放」、「穿透鎖定」、「邊緣躲藏」、「允許推視窗」與「複製 hook 設定」 |
+| **Right-Click Tray Icon** | Open Control Menu | 右鍵點擊系統匣圖示，切換「安靜／標準／過動模式」、「1x/2x/3x 縮放」、「穿透鎖定」、「邊緣躲藏」、「允許推視窗」、「複製 hook 設定」、「重新載入行為設定」與「開啟設定資料夾」 |
 
 **Allow Window Push (`允許推視窗`)** is off by default. When you turn it on, Hyper mode may — at most once every 15 minutes, only after you've been idle for 20 s, and never on a maximized window — walk up to the Claude window and shove it up to 36 px sideways (staying fully on screen). Any input stops it instantly.
 

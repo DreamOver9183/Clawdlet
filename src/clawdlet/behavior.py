@@ -5,10 +5,16 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
 import random
 
 from clawdlet.agent_events import HOOK_SOURCE, SESSION_BUSY, AgentActivity, AgentEvent
+from clawdlet.behavior_table import (
+    BehaviorRow,
+    BehaviorSelector,
+    BehaviorTable,
+    IdleContext,
+    load_bundled_behavior_table,
+)
 from clawdlet.config import (
     ACTIVITY_PROFILES,
     ActivityMode,
@@ -20,6 +26,7 @@ from clawdlet.config import (
 from clawdlet.geometry import Rect, Vec2
 from clawdlet.input_state import PointerSnapshot
 from clawdlet.physics import ImpactEvent, PhysicsBody, step_physics
+from clawdlet.states import PetState
 from clawdlet.window_push import (
     PUSH_MAX_DISTANCE_PX,
     PUSH_MAX_DURATION_S,
@@ -27,53 +34,16 @@ from clawdlet.window_push import (
     PushPlan,
     plan_window_push,
 )
-from clawdlet.work_session import PHASE_TYPING, WorkConfig, WorkDirective, WorkSession, WorkSignal
+from clawdlet.work_session import PHASE_TYPING, WorkDirective, WorkSession, WorkSignal
 
-# Offset of the work-session random stream from ``rng_seed`` (keeps it apart from ``_rng``)
+# Offsets of the side random streams from ``rng_seed`` (keeps them apart from ``_rng``)
 _WORK_RNG_OFFSET = 7919
+_BEHAVIOR_RNG_OFFSET = 104729
 
-
-class PetState(str, Enum):
-    """Milestone 1–3 behavior states for Clawdlet."""
-
-    IDLE = "idle_breathe"
-    BLOB = "idle_blob"
-    WANDER = "walk_horizontal"
-    TYPING = "typing_laptop"
-    PUT_AWAY_LAPTOP = "put_away_laptop"
-    KICK_LAPTOP = "kick_laptop"
-    CLIMB = "climb_vertical"
-    PERCH_CLAUDE = "perch_look_down"
-    DRAGGED = "dragged_struggle"
-    FALLING = "free_fall"
-    THROWN = "thrown"
-    LAND_SQUISH = "land_squish"
-    DIZZY = "dizzy"
-    # Milestone 5 interactions
-    CHASE_CURSOR = "chase_cursor"
-    POUNCE = "pounce"
-    POKED = "poked"
-    PETTED = "petted"
-    FLAIL = "flail"
-    YAWN = "yawn"
-    SLEEP = "sleep"
-    WAKE_STARTLE = "wake_startle"
-    PEEK_EDGE = "peek_edge"
-    CELEBRATE = "celebrate"
-    ERROR_SWEAT = "error_sweat"
-    ALERT = "alert"
-    PUSH_WINDOW = "push_window"
-    # Milestone 6 work sessions
-    WORK_GLANCE = "work_glance"
-
-    @property
-    def animation_name(self) -> str:
-        # THROWN is a distinct FSM state (ends in DIZZY) but shares the free-fall sprite
-        if self is PetState.THROWN:
-            return PetState.FALLING.value
-        if self is PetState.CHASE_CURSOR:
-            return PetState.WANDER.value
-        return self.value
+# Spot detection for the behavior table's ``when.spot``
+_SCREEN_EDGE_PX = 4.0
+_WINDOW_SIDE_PX = 8.0
+_PERCH_EDGE_FRACTION = 0.25  # Of the body width, from either end of the title bar
 
 
 # Resting states that may doze off, pounce, or decide on a new activity
@@ -240,6 +210,7 @@ class ClawdletController:
         activity_mode: ActivityMode = ActivityMode.NORMAL,
         rng_seed: int | None = None,
         interaction_cfg: InteractionConfig | None = None,
+        behavior_table: BehaviorTable | None = None,
     ) -> None:
         self.body = body
         self.work_area = work_area
@@ -299,9 +270,17 @@ class ClawdletController:
 
         # Claude Code hook activity (Milestone 5)
         self.agent = AgentActivity(self.interaction_cfg.agent_busy_expiry_s)
+        # Idle choices come from the behavior table (bundled only: tests never read %APPDATA%).
+        # Its opportunistic rolls use their own stream; weighted picks reuse the FSM's rest roll.
+        self.behavior_table: BehaviorTable = behavior_table or load_bundled_behavior_table()
+        self._behavior_rng = random.Random(None if rng_seed is None else rng_seed + _BEHAVIOR_RNG_OFFSET)
+        self._selector = BehaviorSelector(self.behavior_table, self._behavior_rng)
+        self._active_row: BehaviorRow | None = None   # Row that started the current state (chains)
+        self._active_row_state: PetState | None = None
+
         # Work sessions (typing segments, breaks, heuristic cap) draw from their own stream
         self._work_rng = random.Random(None if rng_seed is None else rng_seed + _WORK_RNG_OFFSET)
-        self._work = WorkSession(WorkConfig(), self._work_rng)
+        self._work = WorkSession(self.behavior_table.settings.work_config(), self._work_rng)
         self._work_directive: WorkDirective = WorkDirective.NONE
         self._work_sig: WorkSignal = WorkSignal(heuristic=False, agent_busy=False)
         self._typing_resumed: bool = False   # TYPING renders typing_loop (no laptop intro)
@@ -345,6 +324,13 @@ class ClawdletController:
 
     def set_work_area(self, work_area: Rect) -> None:
         self.work_area = work_area
+
+    def set_behavior_table(self, table: BehaviorTable) -> None:
+        """Swap in a (re)loaded behavior table; the current state plays out unchanged."""
+        self.behavior_table = table
+        self._selector.set_table(table)
+        self._work.cfg = table.settings.work_config()
+        self._active_row = None
 
     def set_peek_mode(self, enabled: bool) -> None:
         """Toggle edge-peek mode; turning it off pops the pet back out to idle."""
@@ -745,7 +731,11 @@ class ClawdletController:
         self._typing_resumed = True
 
     def _pick_work_break(self) -> PetState:
-        return PetState.WORK_GLANCE
+        """Draw a break state from the table's ``work_breaks`` (its own stream, never ``_rng``)."""
+        row = self._selector.pick_work_break(
+            self._idle_context(self._last_win, perched=self._perched_hwnd is not None)
+        )
+        return PetState.WORK_GLANCE if row is None else PetState[row.state]
 
     def _start_work_break(self) -> None:
         self.body.vx = 0.0
@@ -1123,8 +1113,109 @@ class ClawdletController:
         qy = 0 if abs(dy) < dead_y or abs(dx) > 2.0 * abs(dy) else (1 if dy > 0 else -1)
         return (qy + 1) * 3 + (qx + 1)
 
+    # --- Milestone 6: data-driven idle choices (behavior table) ---------------------------------
+
+    def _idle_context(self, win: WindowSnapshot | None, perched: bool) -> IdleContext:
+        """Describe the current situation for the behavior table's ``when`` conditions."""
+        body = self.body
+        p = self._pointer
+        perchable = win is not None and win.is_perchable
+        spots: set[str] = set()
+        if perched and perchable:
+            assert win is not None
+            max_offset = max(0.0, win.rect.width - body.width)
+            edge = body.width * _PERCH_EDGE_FRACTION
+            if self._perch_offset_x <= edge or self._perch_offset_x >= max_offset - edge:
+                spots.add("perch_edge")
+            else:
+                spots.add("perch_middle")
+        elif not perched:
+            area = self.work_area
+            if body.x <= area.left + _SCREEN_EDGE_PX or body.right >= area.right - _SCREEN_EDGE_PX:
+                spots.add("screen_edge")
+            if perchable:
+                assert win is not None
+                overlap = max(0.0, min(body.bottom, win.rect.bottom) - max(body.y, win.rect.top))
+                near_side = min(
+                    abs(body.right - win.rect.left),
+                    abs(body.x - win.rect.left),
+                    abs(body.x - win.rect.right),
+                    abs(body.right - win.rect.right),
+                )
+                if overlap >= body.height * 0.5 and near_side <= _WINDOW_SIDE_PX:
+                    spots.add("window_side")
+            if not spots:
+                spots.add("open")
+        if p is None:
+            idle_level = 1
+        elif p.idle_s >= self.interaction_cfg.sleep_after_idle_s:
+            idle_level = 3
+        elif p.idle_s >= self.behavior_table.settings.idle_level2_after_s:
+            idle_level = 2
+        else:
+            idle_level = 1
+        cursor_in_window = bool(
+            p is not None
+            and perchable
+            and win is not None
+            and win.rect.left <= p.x <= win.rect.right
+            and win.rect.top <= p.y <= win.rect.bottom
+        )
+        return IdleContext(
+            surface="perch" if perched else "floor",
+            spots=frozenset(spots),
+            mode=self.activity_mode.value,
+            idle_level=idle_level,
+            user_idle_s=None if p is None else p.idle_s,
+            claude_visible=perchable,
+            claude_foreground=bool(win is not None and win.foreground),
+            cursor_in_window=cursor_in_window,
+            prev_state=self.state.name,
+            trigger="rest",
+            now=self._clock,
+        )
+
+    def _take_active_row(self) -> BehaviorRow | None:
+        """The row that started the state being left (for ``next`` chains); consumed by the call."""
+        row = self._active_row if self._active_row_state == self.state else None
+        self._active_row = None
+        return row
+
+    def _start_idle_row(
+        self,
+        win: WindowSnapshot | None,
+        perched: bool,
+        roll: float,
+        lo: float,
+        chain_from: BehaviorRow | None,
+    ) -> None:
+        """Hand the rest roll's remainder ``[lo, 1)`` to the behavior table as ``u`` in ``[0, 1)``."""
+        u = (roll - lo) / (1.0 - lo) if lo < 1.0 else 0.0
+        row = self._selector.pick("rest", self._idle_context(win, perched), u, chain_from=chain_from)
+        if row is not None:
+            self._start_row(row)
+            return
+        # Nothing eligible (e.g. every row disabled): plain rest
+        lo_s, hi_s = (3.0, 5.5) if perched else (2.2, 4.0)
+        self.state = PetState.PERCH_CLAUDE if perched else PetState.IDLE
+        self._state_timer = 0.0
+        self._decision_duration = self._rng.uniform(lo_s, hi_s) * self.profile.rest_duration_multiplier
+
+    def _start_row(self, row: BehaviorRow) -> None:
+        """Enter a table row's state; exactly one ``_rng.uniform`` call, like the code it replaced."""
+        lo_s, hi_s = row.duration_s or (2.2, 4.0)  # The loader requires duration_s on behavior rows
+        duration = self._rng.uniform(lo_s, hi_s)
+        if row.scale_by_rest:
+            duration *= self.profile.rest_duration_multiplier
+        self.state = PetState[row.state]
+        self._state_timer = 0.0
+        self._decision_duration = duration
+        self._active_row = row
+        self._active_row_state = self.state
+
     def _transition_from_floor_rest(self, win: WindowSnapshot | None) -> None:
         """Choose next autonomous state when IDLE, BLOB, or TYPING timer expires on the floor."""
+        chain_from = self._take_active_row()
         if self.manual_typing:
             # Double-clicked again while putting the laptop away: pull it straight back out
             self._enter_manual_typing()
@@ -1148,7 +1239,6 @@ class ClawdletController:
             return
         if self._try_start_chase(win, perched=False):
             return
-        rest_mult = self.profile.rest_duration_multiplier
         r = self._rng.random()
         if self._is_claude_climbable(win) and r < self.effective_seek_weight:
             assert win is not None
@@ -1166,7 +1256,8 @@ class ClawdletController:
 
         self._seeking_claude = False
         roll = self._rng.random()
-        if roll < self.profile.wander_probability:
+        wander_p = self.profile.wander_probability
+        if roll < wander_p:
             self.facing = self._rng.choice((-1, 1))
             if self.body.x <= self.work_area.left + 4.0:
                 self.facing = 1
@@ -1175,17 +1266,14 @@ class ClawdletController:
             self.state = PetState.WANDER
             self._state_timer = 0.0
             self._decision_duration = self._rng.uniform(2.0, 4.2)
-        elif roll < 0.85 and self.state != PetState.BLOB:
-            self.state = PetState.BLOB
-            self._state_timer = 0.0
-            self._decision_duration = self._rng.uniform(2.5, 4.5) * rest_mult
         else:
-            self.state = PetState.IDLE
-            self._state_timer = 0.0
-            self._decision_duration = self._rng.uniform(2.2, 4.0) * rest_mult
+            # Idle tail: the behavior table decides (the default table reproduces BLOB below 0.85
+            # unless already BLOB, else IDLE)
+            self._start_idle_row(win, perched=False, roll=roll, lo=wander_p, chain_from=chain_from)
 
     def _transition_from_perch(self, win: WindowSnapshot) -> None:
         """Choose next autonomous state while perched on Claude Desktop's top border."""
+        chain_from = self._take_active_row()
         if self.manual_typing:
             self._enter_manual_typing()
             return
@@ -1201,7 +1289,6 @@ class ClawdletController:
             return
         if self._try_start_chase(win, perched=True):
             return
-        rest_mult = self.profile.rest_duration_multiplier
         roll = self._rng.random()
         can_stroll = win.rect.width >= self.body.width * 1.4
         wander_cut = min(0.75, self.profile.wander_probability * 0.85)
@@ -1210,14 +1297,23 @@ class ClawdletController:
             self.state = PetState.WANDER
             self._state_timer = 0.0
             self._decision_duration = self._rng.uniform(2.0, 3.8)
-        elif roll < 0.72 and self.state != PetState.BLOB:
-            self.state = PetState.BLOB
-            self._state_timer = 0.0
-            self._decision_duration = self._rng.uniform(2.4, 4.2) * rest_mult
+        elif not can_stroll:
+            # Engine branch: a title bar under 1.4 body widths (unreachable with the tracker's 300 px
+            # minimum window width) keeps the original fixed choice
+            rest_mult = self.profile.rest_duration_multiplier
+            if roll < 0.72 and self.state != PetState.BLOB:
+                self.state = PetState.BLOB
+                self._state_timer = 0.0
+                self._decision_duration = self._rng.uniform(2.4, 4.2) * rest_mult
+            else:
+                self.state = PetState.PERCH_CLAUDE
+                self._state_timer = 0.0
+                self._decision_duration = self._rng.uniform(3.0, 5.5) * rest_mult
         else:
-            self.state = PetState.PERCH_CLAUDE
-            self._state_timer = 0.0
-            self._decision_duration = self._rng.uniform(3.0, 5.5) * rest_mult
+            # Idle tail: the behavior table decides. Right after a stroll no stroll was on offer,
+            # so the whole roll goes to the table (its *_after_stroll rows)
+            lo = 0.0 if self.state == PetState.WANDER else wander_cut
+            self._start_idle_row(win, perched=True, roll=roll, lo=lo, chain_from=chain_from)
 
     def _tick_climb(self, dt: float, win: WindowSnapshot | None, win_vel: Vec2) -> RenderFrameState:
         """Advance vertical climbing along Claude Desktop's side edge or the screen wall."""
@@ -1408,6 +1504,17 @@ class ClawdletController:
         pointer: PointerSnapshot | None = None,
     ) -> RenderFrameState:
         """Advance FSM and physics by ``dt`` seconds."""
+        render = self._tick(dt, win, pointer)
+        if self._active_row is not None and self.state != self._active_row_state:
+            self._active_row = None  # Left the table-chosen state: no chain from it
+        return render
+
+    def _tick(
+        self,
+        dt: float,
+        win: WindowSnapshot | None,
+        pointer: PointerSnapshot | None,
+    ) -> RenderFrameState:
         self._clock += dt
         self._state_timer += dt
         self._update_pointer(dt, pointer)

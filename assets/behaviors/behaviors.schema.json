@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Clawdlet behavior table",
+  "description": "Idle behaviors for Clawdlet. The bundled behaviors.default.json is merged with %APPDATA%\\Clawdlet\\behaviors.json. This schema is for editor autocompletion only; Clawdlet validates the file itself and drops invalid rows with a warning.",
+  "type": "object",
+  "properties": {
+    "$schema": {"type": "string"},
+    "$comment": {"type": "string"},
+    "version": {"const": 1, "description": "File format version."},
+    "extends": {
+      "enum": ["default", "none"],
+      "default": "default",
+      "description": "User file only. 'default': rows whose id already exists are shallow-patched (nested objects such as 'when' are replaced wholesale), new ids are appended, settings are deep-merged. 'none': replace the bundled table."
+    },
+    "settings": {"$ref": "#/$defs/settings"},
+    "behaviors": {"type": "array", "items": {"$ref": "#/$defs/behavior"}},
+    "work_breaks": {"type": "array", "items": {"$ref": "#/$defs/workBreak"}},
+    "fidgets": {"type": "array", "items": {"$ref": "#/$defs/fidget"}},
+    "entrances": {"type": "array", "items": {"$ref": "#/$defs/entrance"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9_]+$", "description": "Unique row id; reuse an existing id to patch that row."},
+    "mode": {"enum": ["quiet", "normal", "hyper"]},
+    "stateName": {
+      "enum": [
+        "IDLE", "BLOB", "WANDER", "TYPING", "PUT_AWAY_LAPTOP", "KICK_LAPTOP", "CLIMB", "PERCH_CLAUDE",
+        "DRAGGED", "FALLING", "THROWN", "LAND_SQUISH", "DIZZY", "CHASE_CURSOR", "POUNCE", "POKED",
+        "PETTED", "FLAIL", "YAWN", "SLEEP", "WAKE_STARTLE", "PEEK_EDGE", "CELEBRATE", "ERROR_SWEAT",
+        "ALERT", "PUSH_WINDOW", "WORK_GLANCE"
+      ]
+    },
+    "span": {
+      "type": "array",
+      "items": {"type": "number", "minimum": 0},
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[min, max]"
+    },
+    "duration": {
+      "type": "array",
+      "items": {"type": "number", "minimum": 0.2, "maximum": 120},
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[min, max] seconds, 0.2..120."
+    },
+    "weight": {
+      "description": "Relative weight (>= 0), or one per activity mode (a missing mode weighs 0).",
+      "oneOf": [
+        {"type": "number", "minimum": 0},
+        {
+          "type": "object",
+          "properties": {
+            "quiet": {"type": "number", "minimum": 0},
+            "normal": {"type": "number", "minimum": 0},
+            "hyper": {"type": "number", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "when": {
+      "type": "object",
+      "description": "Every given condition must hold; lists match any entry.",
+      "properties": {
+        "surface": {"type": "array", "items": {"enum": ["floor", "perch"]}, "minItems": 1},
+        "spot": {
+          "type": "array",
+          "items": {"enum": ["open", "screen_edge", "window_side", "perch_edge", "perch_middle"]},
+          "minItems": 1
+        },
+        "mode": {"type": "array", "items": {"$ref": "#/$defs/mode"}, "minItems": 1},
+        "min_idle_level": {"type": "integer", "minimum": 1, "maximum": 3, "description": "1 active, 2 after settings.idle_level2_after_s of user idle, 3 sleepy."},
+        "max_idle_level": {"type": "integer", "minimum": 1, "maximum": 3},
+        "user_idle_s": {
+          "type": "array",
+          "prefixItems": [{"type": "number", "minimum": 0}, {"type": ["number", "null"], "minimum": 0}],
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "[min, max or null] seconds since the last keyboard/mouse input."
+        },
+        "claude_visible": {"type": "boolean"},
+        "claude_foreground": {"type": "boolean"},
+        "cursor_in_window": {"type": "boolean", "description": "The cursor is inside the Claude Desktop window."},
+        "prev_state": {"type": "array", "items": {"$ref": "#/$defs/stateName"}, "minItems": 1},
+        "not_prev_state": {"type": "array", "items": {"$ref": "#/$defs/stateName"}, "minItems": 1}
+      },
+      "additionalProperties": false
+    },
+    "next": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {"id": {"$ref": "#/$defs/id"}, "weight": {"type": "number", "minimum": 0}},
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["IDLE", "BLOB", "PERCH_CLAUDE"], "description": "PetState to start (IDLE: floor only, PERCH_CLAUDE: perch only)."},
+        "weight": {"$ref": "#/$defs/weight"},
+        "chance": {"type": "number", "minimum": 0, "maximum": 1, "description": "Opportunistic row: rolled on its own before the weighted pick."},
+        "on": {"enum": ["rest", "wall_bump", "window_side"], "default": "rest"},
+        "when": {"$ref": "#/$defs/when"},
+        "duration_s": {"$ref": "#/$defs/duration"},
+        "scale_by_rest": {"type": "boolean", "default": true, "description": "Multiply the duration by the activity mode's rest multiplier."},
+        "cooldown_s": {"type": "number", "minimum": 0},
+        "next": {"$ref": "#/$defs/next"},
+        "next_mode": {"enum": ["add", "replace"], "default": "add", "description": "'add' adds the next rows to the pool, 'replace' picks only among them (chains stop after 4 steps)."},
+        "enabled": {"type": "boolean", "default": true},
+        "description": {"type": "string"}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "workBreak": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["WORK_GLANCE"]},
+        "weight": {"$ref": "#/$defs/weight"},
+        "when": {"$ref": "#/$defs/when"},
+        "duration_s": {"$ref": "#/$defs/duration"},
+        "cooldown_s": {"type": "number", "minimum": 0},
+        "enabled": {"type": "boolean", "default": true},
+        "description": {"type": "string"}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "fidget": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "pose": {"enum": ["look_left", "look_right", "blink", "look_claude"]},
+        "weight": {"$ref": "#/$defs/weight"},
+        "when": {"$ref": "#/$defs/when"},
+        "duration_s": {"type": "array", "items": {"type": "number", "minimum": 0.05}, "minItems": 2, "maxItems": 2},
+        "cooldown_s": {"type": "number", "minimum": 0},
+        "enabled": {"type": "boolean", "default": true},
+        "description": {"type": "string"}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "entrance": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["drop_on_claude", "drop_top", "walk_in_side"]},
+        "weight": {"$ref": "#/$defs/weight"},
+        "when": {"$ref": "#/$defs/when"},
+        "enabled": {"type": "boolean", "default": true},
+        "description": {"type": "string"}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "idle_level2_after_s": {"type": "number", "minimum": 0, "description": "User idle seconds before idle level 2."},
+        "fidget_interval_s": {"$ref": "#/$defs/span"},
+        "mail_away_s": {"type": "number", "minimum": 0},
+        "alert_escalate_s": {"type": "number", "minimum": 0},
+        "work": {
+          "type": "object",
+          "properties": {
+            "segment_s": {
+              "type": "object",
+              "properties": {
+                "quiet": {"$ref": "#/$defs/span"},
+                "normal": {"$ref": "#/$defs/span"},
+                "hyper": {"$ref": "#/$defs/span"}
+              },
+              "additionalProperties": false,
+              "description": "Typing segment length per activity mode."
+            },
+            "break_s": {"$ref": "#/$defs/span"},
+            "heuristic_max_s": {"type": "number", "minimum": 1, "description": "Longest typing run driven only by the Claude Desktop I/O heuristic."},
+            "heuristic_cooldown_s": {"type": "number", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
