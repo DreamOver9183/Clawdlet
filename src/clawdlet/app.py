@@ -16,7 +16,7 @@ import tkinter as tk
 
 from clawdlet.agent_events import (
     DEFAULT_HOOK_PORT,
-    AgentEvent,
+    AgentSignal,
     HookServer,
     format_hook_settings,
     load_or_create_token,
@@ -68,6 +68,7 @@ from clawdlet.tray import (
     CMD_TOGGLE_DEBUG,
     CMD_TOGGLE_HOOK_INSTALL,
     CMD_TOGGLE_LISTEN,
+    CMD_TOGGLE_NOTIFY,
     CMD_TOGGLE_MAIL,
     CMD_TOGGLE_PEEK,
     CMD_TOGGLE_TYPING,
@@ -144,6 +145,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-listen",
         action="store_true",
         help="Don't tilt the head toward Claude Desktop while you type into it.",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Don't hold up a sign when Claude Code waits for a plan review, an answer or a "
+        "permission (a hook's prompt still gets the plain '!').",
     )
     parser.add_argument(
         "--hook-port",
@@ -278,6 +285,15 @@ class ExitSequencer:
         return self.deadline is not None and now >= self.deadline
 
 
+def set_notify_enabled(
+    controller: ClawdletController, watcher: TranscriptWatcher | None, enabled: bool
+) -> None:
+    """Notifications on / off: the controller's signs and the transcript's quiet-tool hints."""
+    controller.set_notify_enabled(enabled)
+    if watcher is not None:
+        watcher.hint_enabled = enabled
+
+
 def sync_tray_state(tray_state: TrayMenuState, controller: ClawdletController) -> None:
     """Mirror controller-owned toggles (changed by double-click, hop, drag, auto put-away) into the tray menu."""
     tray_state.manual_typing = controller.manual_typing
@@ -387,6 +403,7 @@ def dispatch_tray_action(
     behaviors_path: Path | None = None,
     folder_opener: Callable[[Path], None] | None = None,
     entrance_sides: tuple[int, ...] = SCREEN_SIDES,
+    transcript_watcher: TranscriptWatcher | None = None,
 ) -> bool:
     """Apply a single tray menu command. Return True if application should exit."""
     if cmd_id == CMD_SUMMON_CENTER:
@@ -407,6 +424,9 @@ def dispatch_tray_action(
     elif cmd_id == CMD_TOGGLE_LISTEN:
         controller.set_listen_enabled(not controller.listen_enabled)
         tray_state.listen_enabled = controller.listen_enabled
+    elif cmd_id == CMD_TOGGLE_NOTIFY:
+        set_notify_enabled(controller, transcript_watcher, not controller.notify_enabled)
+        tray_state.notify_enabled = controller.notify_enabled
     elif cmd_id == CMD_TOGGLE_PEEK:
         controller.set_peek_mode(not controller.peek_mode)
         tray_state.peek_mode = controller.peek_mode
@@ -538,8 +558,9 @@ def main(argv: list[str] | None = None) -> int:
         window_push=args.allow_window_push,
         mail_enabled=not args.no_mail,
         listen_enabled=not args.no_listen,
+        notify_enabled=not args.no_notify,
     )
-    hook_queue: queue.Queue[tuple[AgentEvent, str, str]] = queue.Queue()
+    hook_queue: queue.Queue[AgentSignal] = queue.Queue()
     hook_server: HookServer | None = None
     hook_config: str | None = None
     hook_setup: HookSetup | None = None
@@ -564,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_transcript_watch:
         transcript_watcher = TranscriptWatcher(events=hook_queue)
         transcript_watcher.start()
+    set_notify_enabled(controller, transcript_watcher, not args.no_notify)
 
     tray_icon: Win32TrayIcon | None = None
     if not args.no_tray:
@@ -653,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
                 hook_setup=hook_setup,
                 behaviors_path=args.behaviors,
                 entrance_sides=entrance_sides,
+                transcript_watcher=transcript_watcher,
             )
             if should_exit:
                 goodbye_s = 0.0 if exit_sequencer.pending else controller.begin_goodbye()
@@ -665,15 +688,19 @@ def main(argv: list[str] | None = None) -> int:
 
         while True:
             try:
-                agent_event, session_id, source = hook_queue.get_nowait()
+                signal_ = hook_queue.get_nowait()
             except queue.Empty:
                 break
             if overlay.debug:
+                kind = f" kind={signal_.kind.value}" if signal_.kind is not None else ""
+                desktop = " desktop" if signal_.desktop else ""
                 print(
-                    f"[Clawdlet] agent event={agent_event.value} "
-                    f"session={session_id[:8]} source={source}"
+                    f"[Clawdlet] agent event={signal_.event.value} "
+                    f"session={signal_.session[:8]} source={signal_.source}{kind}{desktop}"
                 )
-            controller.handle_agent_event(agent_event, session_id, source)
+            controller.handle_agent_event(
+                signal_.event, signal_.session, signal_.source, signal_.kind, signal_.desktop
+            )
 
         render_state = None
         while accumulator >= fixed_dt:
@@ -701,8 +728,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[Clawdlet] {format_thinking_sample(sample, tracker.cfg.thinking_min_active)}")
             print(
                 f"[Clawdlet] agent {controller.agent.describe(controller.clock)} "
-                f"| {controller.work_description()}"
+                f"| {controller.work_description()} | {controller.describe_notify()}"
             )
+        while controller.debug_events:
+            message = controller.debug_events.popleft()
+            if overlay.debug:
+                print(f"[Clawdlet] {message}")
 
         root.after(12, _on_tick)
 

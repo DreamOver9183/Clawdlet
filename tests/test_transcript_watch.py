@@ -9,7 +9,7 @@ import queue
 
 import pytest
 
-from clawdlet.agent_events import AgentEvent
+from clawdlet.agent_events import AgentEvent, AgentSignal
 from clawdlet.transcript_watch import (
     BUSY_FRESH_S,
     BUSY_REFRESH_S,
@@ -148,11 +148,16 @@ def _append(path: Path, clock: _Clock, *records: dict) -> None:
     os.utime(path, (clock.t, clock.t))
 
 
-def _drain(q: queue.Queue) -> list[tuple]:
+def _drain_signals(q: queue.Queue) -> list[AgentSignal]:
     out = []
     while not q.empty():
         out.append(q.get_nowait())
     return out
+
+
+def _drain(q: queue.Queue) -> list[tuple]:
+    """(event, session, source) of each queued signal."""
+    return [tuple(s[:3]) for s in _drain_signals(q)]
 
 
 @pytest.fixture
@@ -162,6 +167,7 @@ def project(tmp_path: Path):
     clock = _Clock(1_000_000.0)
     q: queue.Queue = queue.Queue()
     watcher = TranscriptWatcher(events=q, projects_dir=tmp_path / "projects", clock=clock)
+    watcher.hint_enabled = False  # The pre-notification behaviour; the notify tests turn it on
     return proj, clock, q, watcher
 
 

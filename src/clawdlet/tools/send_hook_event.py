@@ -4,6 +4,7 @@ Usage:
     python -m clawdlet.tools.send_hook_event Stop
     python -m clawdlet.tools.send_hook_event Notification --session demo --port 47821
     python -m clawdlet.tools.send_hook_event Notification --notification-type idle_prompt
+    python -m clawdlet.tools.send_hook_event PreToolUse --tool-name ExitPlanMode
 """
 
 from __future__ import annotations
@@ -23,11 +24,14 @@ def send_hook_event(
     token: str,
     session_id: str,
     notification_type: str | None = None,
+    tool_name: str | None = None,
 ) -> int:
     """POST one hook payload; return the HTTP status code."""
     payload = {"hook_event_name": event_name, "session_id": session_id}
     if notification_type:
         payload["notification_type"] = notification_type
+    if tool_name:
+        payload["tool_name"] = tool_name
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{HOOK_PATH}",
@@ -52,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="notification_type for Notification events (e.g. permission_prompt, idle_prompt)",
     )
+    parser.add_argument(
+        "--tool-name",
+        default=None,
+        help="tool_name for tool events (e.g. ExitPlanMode, AskUserQuestion)",
+    )
     args = parser.parse_args(argv)
 
     token = read_token()
@@ -59,7 +68,9 @@ def main(argv: list[str] | None = None) -> int:
         print("No hook token yet: start Clawdlet once so it creates one.", file=sys.stderr)
         return 1
     try:
-        status = send_hook_event(args.event, args.port, token, args.session, args.notification_type)
+        status = send_hook_event(
+            args.event, args.port, token, args.session, args.notification_type, args.tool_name
+        )
     except OSError as exc:
         print(f"Could not reach Clawdlet on port {args.port}: {exc}", file=sys.stderr)
         return 1

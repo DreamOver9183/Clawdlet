@@ -91,7 +91,51 @@ python -m pytest -v
 - [ ] **整個檔案改成無效 JSON：** 印出 `… — using defaults`，Clawd 照常運作。
 - [ ] `clawdlet --dump-behaviors`：輸出合法 JSON，沒有警告。
 
-## 7. 打包
+## 7. 需要我時通知
+
+### 7.1 Desktop 的 hook 行為（尚未確認）
+
+這項功能動工前原本要先在實機上確認 Claude Desktop Code 分頁的 hook 行為，但這一步跳過了，程式目前用保守的預設值（`src/clawdlet/agent_events.py`）：
+
+- `DESKTOP_SENDS_PERMISSION_HOOK = False`：假設 Desktop 等待授權時不送 `Notification(permission_prompt)`，所以有裝 hooks 的 Desktop session 也接受 transcript 的「…」提示。
+- `DESKTOP_HOOK_CLEARS_ON_REJECT = False`：假設拒絕授權或退回計畫後不送 `PostToolUse`／`PostToolUseFailure`，所以 Desktop session 的通知也可以由 transcript 清除（通知建立 2 秒後才生效）。
+
+要確認時：建立一個測試專案，在它的 `.claude/settings.local.json` 對 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`PermissionRequest`、`Notification`、`Stop` 註冊 `type: http` hook，指向一個只記錄 `hook_event_name`／`tool_name`／`notification_type` 的本機接收器。在 Desktop 的 Code 分頁（預設權限模式）依序操作：交出 plan、AskUserQuestion、需要授權的 Bash（允許一次、拒絕一次）、退回 plan。記錄以下結果，再依結果調整這兩個常數：
+
+- [ ] 等待授權時有沒有 `Notification(permission_prompt)`
+- [ ] `ExitPlanMode`／`AskUserQuestion` 有沒有觸發 `PreToolUse`，`tool_name` 是否正確
+- [ ] 拒絕或退回後送了哪些 hook
+- [ ] transcript 是否在審核／發問畫面出現**之前**就寫入 `tool_use`
+
+### 7.2 hook 模擬（兩個終端機）
+
+前置：先開著 Claude Desktop；步驟 1–4 期間，焦點留在終端機或其他非 Desktop 視窗。
+
+終端機 A：
+
+```powershell
+python -m clawdlet --debug --no-tray --no-transcript-watch --hook-port 47999 --duration 300
+```
+
+終端機 B，每一步之間觀察 A 的 log 和畫面：
+
+- [ ] `python -m clawdlet.tools.send_hook_event PreToolUse --tool-name ExitPlanMode --port 47999 --session demo`：出現 `state=NOTIFY`、`notify=[demo plan hook …]`，Clawd 舉起卷軸。不動鍵鼠 12 秒後變成 `NOTIFY_SEEK`、接著 `NOTIFY_WAIT`，走到游標旁。點 Clawd 後印出 `notify click: focus …`，Claude Desktop 到前景，狀態變成 `POKED`。結束後把焦點切回終端機。
+- [ ] `python -m clawdlet.tools.send_hook_event Notification --notification-type permission_prompt --port 47999 --session demo`：不會重新顯示（`notify=[demo plan hook … ack]`）。
+- [ ] `python -m clawdlet.tools.send_hook_event PostToolUse --port 47999 --session demo`：`notify=[]`。
+- [ ] `python -m clawdlet.tools.send_hook_event PreToolUse --tool-name AskUserQuestion --port 47999 --session q1`，2 秒後 `python -m clawdlet.tools.send_hook_event Notification --notification-type permission_prompt --port 47999 --session p1`：先出現問號，再換成鑰匙；`python -m clawdlet.tools.send_hook_event PostToolUse --port 47999 --session p1` 送出後直接換回問號；`python -m clawdlet.tools.send_hook_event PostToolUse --port 47999 --session q1` 送出後 `notify=[]`。
+- [ ] 先把 Claude Desktop 切到前景並保持，再送 `python -m clawdlet.tools.send_hook_event Notification --notification-type permission_prompt --port 47999 --session p2`（可先打 `Start-Sleep 3;` 再切到 Desktop）：30 秒內 log 不出現 `NOTIFY_SEEK`。
+
+### 7.3 實機（Claude Desktop 的 Code 分頁）
+
+先關掉其他 Clawdlet 實例，以 `python -m clawdlet --debug` 啟動。
+
+- [ ] **無 hooks，plan 審核**：2 秒內舉起卷軸（log 有 `source=transcript`）。切到其他視窗、不動鍵鼠 12 秒後走到游標旁；點 Clawd 後 Desktop 回到前景。
+- [ ] **無 hooks，AskUserQuestion**：2 秒內出現問號，升級與點擊行為同上。
+- [ ] **無 hooks，需要授權的 Bash**（焦點留在 Desktop 以外）：第 8 秒起打字動畫頭上出現「…」；約第 25 秒收起筆電，改成原地「…」；約第 38 秒消失。全程 log 不出現 `NOTIFY_SEEK`。
+- [ ] **有 hooks**（只裝在測試專案）：plan 審核和 AskUserQuestion 在 log 出現 `source=hook` 的 attention 事件。需要授權的 Bash，如果 Desktop 會送 `permission_prompt` 就顯示鑰匙，否則顯示打字加「…」泡泡（`source=transcript`）。
+- [ ] **系統匣「需要我時通知 (Notify When Needed)」**：關閉後不再舉牌，hooks 的提示改回「!」；`--no-notify` 效果相同。
+
+## 8. 打包
 
 ```powershell
 python -m clawdlet.tools.build_exe

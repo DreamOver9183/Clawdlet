@@ -13,7 +13,7 @@ import queue
 import secrets
 import socket
 import threading
-from typing import Any
+from typing import Any, NamedTuple
 
 from clawdlet.paths import app_data_dir
 
@@ -44,6 +44,35 @@ class AgentEvent(str, Enum):
     SUBAGENT_START = "subagent_start"
     SUBAGENT_STOP = "subagent_stop"
     COMPACT = "compact"      # The conversation was compacted
+    HINT = "hint"            # A tool call has been quiet a while: maybe a permission prompt (transcript)
+
+
+class AttentionKind(str, Enum):
+    """Why a session is waiting on the user (picks the notification Clawd shows)."""
+
+    PLAN = "plan"              # ExitPlanMode: a plan to review
+    QUESTION = "question"      # AskUserQuestion / an MCP elicitation dialog
+    PERMISSION = "permission"  # A tool call waits for approval
+    HINT = "hint"              # Transcript guess: a tool call went quiet, maybe a permission prompt
+    GENERIC = "generic"        # Any other notification: the plain '!' alert
+
+
+# How Claude Desktop's Code tab behaves with hooks installed. The live check (Step 0 of the
+# notification plan) was skipped, so both are the cautious defaults: assume Desktop sends no
+# permission_prompt Notification (so its sessions keep the transcript's quiet-tool HINT) and no
+# PostToolUse / PostToolUseFailure after a rejection (so the transcript may also clear its alerts).
+DESKTOP_SENDS_PERMISSION_HOOK = False
+DESKTOP_HOOK_CLEARS_ON_REJECT = False
+
+
+class AgentSignal(NamedTuple):
+    """One activity event on the queue from the hook server / transcript watcher to the controller."""
+
+    event: AgentEvent
+    session: str
+    source: str
+    kind: AttentionKind | None = None
+    desktop: bool = False    # The transcript says the session runs in Claude Desktop (entrypoint)
 
 
 HOOK_EVENT_MAP: dict[str, AgentEvent] = {
@@ -80,6 +109,15 @@ _TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
 # Notification types that do not need the user's attention ("Claude is waiting for your input"
 # fires after a finished turn has sat idle; auth_success just confirms a login)
 _QUIET_NOTIFICATION_TYPES = frozenset({"idle_prompt", "auth_success"})
+_NOTIFICATION_KINDS = {
+    "permission_prompt": AttentionKind.PERMISSION,
+    "elicitation_dialog": AttentionKind.QUESTION,
+}
+# Tools that always stop and wait for the user: their PreToolUse is a notification, not work
+INTERACTIVE_TOOL_KINDS = {
+    "ExitPlanMode": AttentionKind.PLAN,
+    "AskUserQuestion": AttentionKind.QUESTION,
+}
 
 
 def scan_payload_head(head: bytes) -> dict[str, str]:
@@ -96,11 +134,13 @@ def scan_payload_head(head: bytes) -> dict[str, str]:
     return fields
 
 
-def map_hook_payload(payload: Any) -> tuple[AgentEvent, str] | None:
-    """Map a hook JSON payload to (event, session_id).
+def map_hook_payload(payload: Any) -> tuple[AgentEvent, str, AttentionKind | None] | None:
+    """Map a hook JSON payload to (event, session_id, attention kind).
 
-    Only the event name, the session id and the ``notification_type`` enum are read; messages,
-    prompts and tool inputs are never touched.
+    Only the event name, the session id, the ``notification_type`` enum and the ``tool_name``
+    are read; messages, prompts and tool inputs are never touched. ``tool_name`` is only present
+    in fully parsed payloads (the oversized-body head scan never extracts it), so a huge
+    ExitPlanMode body maps to plain BUSY rather than risk matching text inside ``tool_input``.
     """
     if not isinstance(payload, dict):
         return None
@@ -108,12 +148,22 @@ def map_hook_payload(payload: Any) -> tuple[AgentEvent, str] | None:
     event = HOOK_EVENT_MAP.get(name) if isinstance(name, str) else None
     if event is None:
         return None
-    if name == "Notification" and payload.get("notification_type") in _QUIET_NOTIFICATION_TYPES:
-        return None
+    kind: AttentionKind | None = None
+    if name == "Notification":
+        notification_type = payload.get("notification_type")
+        if notification_type in _QUIET_NOTIFICATION_TYPES:
+            return None
+        kind = _NOTIFICATION_KINDS.get(notification_type, AttentionKind.GENERIC)
+    elif name == "PermissionRequest":
+        kind = AttentionKind.PERMISSION
+    elif name == "PreToolUse":
+        kind = INTERACTIVE_TOOL_KINDS.get(payload.get("tool_name"))
+        if kind is not None:
+            event = AgentEvent.ATTENTION
     session = payload.get("session_id")
     if not isinstance(session, str) or not session:
         session = DEFAULT_SESSION
-    return event, session[:128]
+    return event, session[:128], kind
 
 
 SESSION_BUSY = "busy"
@@ -177,7 +227,8 @@ class AgentActivity:
             st.phase, st.last_t, st.source = SESSION_WAITING, now, source
         elif event in (AgentEvent.DONE, AgentEvent.FAILED, AgentEvent.END, AgentEvent.INTERRUPTED):
             self.sessions.pop(session_id, None)  # Its subagent count goes with it
-        # COMPACT changes nothing here: the controller molts, the session keeps its phase
+        # COMPACT changes nothing here: the controller molts, the session keeps its phase.
+        # Neither does HINT: it is only a guess, so typing carries on until WAITING (25 s).
         return was_busy
 
     def describe(self, now: float) -> str:
@@ -269,13 +320,25 @@ class _HookRequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         self.end_headers()
 
+    def _discard_small_body(self) -> None:
+        """Read a small unread body before an error reply: closing a socket with unread bytes
+        sends an RST on Windows, and the client then sees a reset instead of the status."""
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if 0 < length <= MAX_BODY_BYTES:
+            self.rfile.read(length)
+
     def do_POST(self) -> None:  # noqa: N802 (http.server naming)
         if self.path != HOOK_PATH:
+            self._discard_small_body()
             self._reply(404)
             return
         expected = f"Bearer {self.server.token}".encode()
         given = (self.headers.get("Authorization") or "").encode()
         if not hmac.compare_digest(given, expected):
+            self._discard_small_body()
             self._reply(401)
             return
         try:
@@ -302,7 +365,8 @@ class _HookRequestHandler(BaseHTTPRequestHandler):
                 return
         mapped = map_hook_payload(payload)
         if mapped is not None:
-            self.server.events.put((*mapped, HOOK_SOURCE))
+            event, session, kind = mapped
+            self.server.events.put(AgentSignal(event, session, HOOK_SOURCE, kind))
         self._reply(200)
 
     def _drain_body(self, length: int) -> bytes:

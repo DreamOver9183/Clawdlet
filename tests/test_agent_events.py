@@ -15,6 +15,8 @@ from clawdlet.agent_events import (
     MAX_BODY_BYTES,
     AgentActivity,
     AgentEvent,
+    AgentSignal,
+    AttentionKind,
     HookServer,
     build_hook_settings,
     load_or_create_token,
@@ -53,23 +55,24 @@ TOKEN = "test-token-not-secret"
     ],
 )
 def test_map_hook_payload_known_events(name: str, event: AgentEvent) -> None:
-    assert map_hook_payload({"hook_event_name": name, "session_id": "s1"}) == (event, "s1")
+    kind = {"Notification": AttentionKind.GENERIC, "PermissionRequest": AttentionKind.PERMISSION}.get(name)
+    assert map_hook_payload({"hook_event_name": name, "session_id": "s1"}) == (event, "s1", kind)
 
 
 def test_map_hook_payload_rejects_unknown_and_malformed() -> None:
     assert map_hook_payload({"hook_event_name": "SessionStart"}) is None
     assert map_hook_payload({"hook_event_name": 42}) is None
     assert map_hook_payload(["Stop"]) is None
-    assert map_hook_payload({"hook_event_name": "Stop"}) == (AgentEvent.DONE, "default")
+    assert map_hook_payload({"hook_event_name": "Stop"}) == (AgentEvent.DONE, "default", None)
 
 
 @pytest.mark.parametrize(
     ("notification_type", "expected"),
     [
-        ("permission_prompt", AgentEvent.ATTENTION),
-        ("elicitation_dialog", AgentEvent.ATTENTION),
-        ("something_new", AgentEvent.ATTENTION),  # unknown types keep the old behaviour
-        (None, AgentEvent.ATTENTION),
+        ("permission_prompt", AttentionKind.PERMISSION),
+        ("elicitation_dialog", AttentionKind.QUESTION),
+        ("something_new", AttentionKind.GENERIC),  # unknown types keep the old '!' alert
+        (None, AttentionKind.GENERIC),
         ("idle_prompt", None),
         ("auth_success", None),
     ],
@@ -78,10 +81,29 @@ def test_notification_type_filters_quiet_notifications(notification_type, expect
     payload = {"hook_event_name": "Notification", "session_id": "s1", "message": "stub"}
     if notification_type is not None:
         payload["notification_type"] = notification_type
-    assert map_hook_payload(payload) == (None if expected is None else (expected, "s1"))
+    assert map_hook_payload(payload) == (None if expected is None else (AgentEvent.ATTENTION, "s1", expected))
     # Only Notification is filtered; the field means nothing on other events
     assert map_hook_payload({"hook_event_name": "Stop", "notification_type": "idle_prompt"}) == (
-        AgentEvent.DONE, "default")
+        AgentEvent.DONE, "default", None)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("ExitPlanMode", (AgentEvent.ATTENTION, "s1", AttentionKind.PLAN)),
+        ("AskUserQuestion", (AgentEvent.ATTENTION, "s1", AttentionKind.QUESTION)),
+        ("Bash", (AgentEvent.BUSY, "s1", None)),
+        (None, (AgentEvent.BUSY, "s1", None)),
+    ],
+)
+def test_interactive_tools_map_to_notifications(tool_name, expected) -> None:
+    payload = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_input": {"plan": "x"}}
+    if tool_name is not None:
+        payload["tool_name"] = tool_name
+    assert map_hook_payload(payload) == expected
+    # Only PreToolUse turns into a notification: PostToolUse means the user already answered
+    payload["hook_event_name"] = "PostToolUse"
+    assert map_hook_payload(payload) == (AgentEvent.BUSY, "s1", None)
 
 
 def test_agent_activity_busy_lifecycle_and_expiry() -> None:
@@ -209,7 +231,7 @@ def test_server_accepts_authorized_event(server) -> None:
     srv, events = server
     body = json.dumps({"hook_event_name": "Stop", "session_id": "s9", "tool_input": {"x": 1}}).encode()
     assert _post(srv.port, body) == 200
-    assert events.get(timeout=2) == (AgentEvent.DONE, "s9", "hook")
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.DONE, "s9", "hook")
 
 
 def test_server_ignores_unknown_events_with_200(server) -> None:
@@ -245,7 +267,30 @@ def test_oversized_tool_payload_is_drained_and_still_mapped(server) -> None:
         "tool_response": {"content": "x" * (MAX_BODY_BYTES * 3)},
     }
     assert _post(srv.port, json.dumps(payload).encode()) == 200
-    assert events.get(timeout=2) == (AgentEvent.BUSY, "big", "hook")
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.BUSY, "big", "hook")
+
+
+def test_oversized_payloads_never_guess_the_tool(server) -> None:
+    """Above MAX_BODY_BYTES only the head is scanned and ``tool_name`` is never read from it."""
+    srv, events = server
+    # A: a normal tool whose huge input (placed first) contains the interactive tool's name
+    decoy = '"tool_name": "ExitPlanMode", '
+    body = (
+        '{"session_id": "a", "hook_event_name": "PreToolUse", "tool_input": {"content": "'
+        + decoy.replace('"', '\\"') + "x" * (MAX_BODY_BYTES * 2) + '"}, "tool_name": "Write"}'
+    )
+    assert _post(srv.port, body.encode()) == 200
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.BUSY, "a", "hook")
+    # B: a huge ExitPlanMode: plain BUSY (the transcript watcher spots the plan instead)
+    payload = {"session_id": "b", "hook_event_name": "PreToolUse", "tool_name": "ExitPlanMode",
+               "tool_input": {"plan": "x" * (MAX_BODY_BYTES * 2)}}
+    assert _post(srv.port, json.dumps(payload).encode()) == 200
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.BUSY, "b", "hook")
+    # C: a huge PermissionRequest is recognised by its event name alone
+    payload = {"session_id": "c", "hook_event_name": "PermissionRequest", "tool_name": "Write",
+               "tool_input": {"content": "x" * (MAX_BODY_BYTES * 2)}}
+    assert _post(srv.port, json.dumps(payload).encode()) == 200
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.ATTENTION, "c", "hook", AttentionKind.PERMISSION)
 
 
 def test_scan_payload_head_extracts_common_fields() -> None:
@@ -266,7 +311,7 @@ def test_second_server_on_same_port_fails_gracefully(server) -> None:
 def test_send_hook_event_tool_round_trip(server) -> None:
     srv, events = server
     assert send_hook_event("Notification", srv.port, TOKEN, "dev") == 200
-    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev", "hook")
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.ATTENTION, "dev", "hook", AttentionKind.GENERIC)
     assert send_hook_event("Stop", srv.port, "bad", "dev") == 401
 
 
@@ -278,13 +323,16 @@ def test_send_hook_event_tool_notification_type(server, monkeypatch) -> None:
     argv = ["Notification", "--port", str(srv.port), "--session", "cli", "--notification-type", "auth_success"]
     assert tool.main(argv) == 0
     assert tool.main(["SubagentStop", "--port", str(srv.port), "--session", "cli"]) == 0
-    assert events.get(timeout=2) == (AgentEvent.SUBAGENT_STOP, "cli", "hook")  # auth_success: dropped
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.SUBAGENT_STOP, "cli", "hook")  # auth_success: dropped
     assert send_hook_event("Notification", srv.port, TOKEN, "dev", notification_type="idle_prompt") == 200
     assert send_hook_event("Notification", srv.port, TOKEN, "dev", "permission_prompt") == 200
-    assert events.get(timeout=2) == (AgentEvent.ATTENTION, "dev", "hook")  # idle_prompt was dropped
+    assert events.get(timeout=2) == AgentSignal(  # idle_prompt was dropped
+        AgentEvent.ATTENTION, "dev", "hook", AttentionKind.PERMISSION)
     assert events.empty()
     assert send_hook_event("PreCompact", srv.port, TOKEN, "dev") == 200
-    assert events.get(timeout=2) == (AgentEvent.COMPACT, "dev", "hook")
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.COMPACT, "dev", "hook")
+    assert tool.main(["PreToolUse", "--port", str(srv.port), "--session", "cli", "--tool-name", "ExitPlanMode"]) == 0
+    assert events.get(timeout=2) == AgentSignal(AgentEvent.ATTENTION, "cli", "hook", AttentionKind.PLAN)
 
 
 # --- Controller reactions --------------------------------------------------------------------------

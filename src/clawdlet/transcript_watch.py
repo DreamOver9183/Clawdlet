@@ -7,7 +7,10 @@ of the file is read — their type / subtype, a few boolean flags (``isMeta``, `
 (``<command-name>``, ``[Request interrupted by user`` ...) — never the conversation itself, which is
 neither stored nor logged. From that it tells whether a session is generating, running a tool,
 finished, or was interrupted. A tool call whose transcript stays silent for ``TOOL_WAIT_S`` is
-reported once as WAITING (most likely a permission prompt) and no longer counts as busy.
+reported once as WAITING (most likely a permission prompt) and no longer counts as busy; after
+``PERMISSION_HINT_S`` it is already worth a gentle HINT. The *names* of pending ``tool_use``
+blocks (never their inputs) tell a plan review or a question apart, and the top-level
+``entrypoint`` tells a Claude Desktop session from a terminal one.
 The format is not a public API, so anything unrecognized yields nothing.
 """
 
@@ -23,7 +26,7 @@ import threading
 import time
 from typing import Callable
 
-from clawdlet.agent_events import AgentEvent
+from clawdlet.agent_events import INTERACTIVE_TOOL_KINDS, AgentEvent, AgentSignal, AttentionKind
 
 TAIL_BYTES = 64 * 1024
 TRACK_WINDOW_S = 600.0      # Only sessions written within the last 10 minutes are tracked
@@ -33,7 +36,10 @@ BUSY_REFRESH_S = 60.0       # Re-announce BUSY so AgentActivity doesn't expire m
 BUSY_FRESH_S = 90.0         # ...but only while the transcript itself is still being written
 STARTUP_FRESH_S = 30.0      # On first sight, only a just-written busy session counts
 TOOL_WAIT_S = 25.0          # A tool call this quiet is probably waiting on a permission prompt
+PERMISSION_HINT_S = 8.0     # ...and this quiet is worth a gentle "maybe waiting on you" hint
+MAX_TAIL_BYTES = 1024 * 1024  # A record longer than TAIL_BYTES (a long plan) is read up to this
 SOURCE = "transcript"
+DESKTOP_ENTRYPOINT = "claude-desktop"  # The ``entrypoint`` Claude Desktop's Code tab writes
 
 _IDLE_STOP_REASONS = frozenset({"end_turn", "stop_sequence", "max_tokens", "refusal"})
 # Turn-ending system records (Stop hooks ran / the conversation was compacted)
@@ -134,6 +140,77 @@ def classify_tail(lines: list[bytes]) -> TurnPhase | None:
     return None
 
 
+def _parsed(lines: list[bytes]) -> list[dict]:
+    records = []
+    for raw in lines:
+        try:
+            record = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def pending_tool(lines: list[bytes]) -> tuple[str | None, tuple[str, ...]]:
+    """(wait key, tool names) when the newest conversation record is a ``tool_use`` stop.
+
+    Claude Code writes one record per content block, so the names are gathered from the trailing
+    assistant records sharing that ``message.id`` (the wait key; the record ``uuid`` stands in when
+    there is none). Only the ``name`` of each ``tool_use`` block is read, never its ``input``.
+    """
+    records = _parsed(lines)
+    last = next((r for r in reversed(records) if classify_record(r) is not None), None)
+    if last is None or classify_record(last) is not TurnPhase.TOOL:
+        return None, ()
+    message = last["message"]
+    message_id = message.get("id")
+    key = message_id if isinstance(message_id, str) else last.get("uuid")
+    names: list[str] = []
+    for record in reversed(records):
+        msg = record.get("message")
+        if record.get("type") != "assistant" or not isinstance(msg, dict):
+            continue
+        if record is not last and (message_id is None or msg.get("id") != message_id):
+            if classify_record(record) is not None:
+                break  # An older turn
+            continue
+        for block in msg.get("content") or ():
+            if isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("name"), str):
+                names.append(block["name"])
+        if message_id is None:
+            break
+    return (key if isinstance(key, str) else None), tuple(reversed(names))
+
+
+def interactive_kind(names: tuple[str, ...]) -> AttentionKind | None:
+    """The notification an ExitPlanMode / AskUserQuestion call stands for (None for other tools)."""
+    return next((INTERACTIVE_TOOL_KINDS[n] for n in names if n in INTERACTIVE_TOOL_KINDS), None)
+
+
+def session_entrypoint(lines: list[bytes]) -> str | None:
+    """The newest top-level ``entrypoint`` (``claude-desktop``, ``cli``, ``sdk-cli`` ...)."""
+    for record in reversed(_parsed(lines)):
+        entrypoint = record.get("entrypoint")
+        if isinstance(entrypoint, str):
+            return entrypoint
+    return None
+
+
+def read_tail_adaptive(path: Path, size: int) -> list[bytes]:
+    """``read_tail``, widening the window (up to MAX_TAIL_BYTES) while no record in it classifies.
+
+    A single record longer than the window (an ExitPlanMode call carrying a long plan) is cut
+    at the front and dropped by ``read_tail``; doubling the window brings it back.
+    """
+    window = TAIL_BYTES
+    while True:
+        lines = read_tail(path, window)
+        if classify_tail(lines) is not None or window >= size or window >= MAX_TAIL_BYTES:
+            return lines
+        window = min(window * 2, MAX_TAIL_BYTES)
+
+
 def latest_compact_marker(lines: list[bytes]) -> str | None:
     """Identity (uuid / timestamp) of the newest ``compact_boundary`` record in a transcript tail."""
     for raw in reversed(lines):
@@ -162,6 +239,19 @@ class _Tracked:
     last_busy_emit: float
     waiting: bool = False             # WAITING was emitted for the current quiet tool call
     compact_marker: str | None = None
+    entrypoint: str | None = None
+    tool_key: str | None = None       # Wait key of the tool call the transcript currently stops on
+    hinted: bool = False              # HINT was emitted for that tool call
+    notified: bool = False            # ATTENTION (plan / question) was emitted for it
+    wait_id: str | None = None        # The tool call those flags belong to
+
+    @property
+    def in_wait(self) -> bool:
+        return self.waiting or self.hinted or self.notified
+
+    def end_wait(self) -> None:
+        self.waiting = self.hinted = self.notified = False
+        self.wait_id = None
 
 
 class TranscriptWatcher:
@@ -178,11 +268,14 @@ class TranscriptWatcher:
         self._clock = clock
         self._tracked: dict[Path, _Tracked] = {}
         self._last_rescan = float("-inf")
+        self.hint_enabled = True  # The app mirrors the "Notify When Needed" switch here
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def _emit(self, event: AgentEvent, path: Path) -> None:
-        self.events.put((event, path.stem, SOURCE))
+    def _emit(self, event: AgentEvent, path: Path, kind: AttentionKind | None = None) -> None:
+        st = self._tracked.get(path)
+        desktop = st is not None and st.entrypoint == DESKTOP_ENTRYPOINT
+        self.events.put(AgentSignal(event, path.stem, SOURCE, kind, desktop))
 
     def _recent_transcripts(self, now: float) -> list[Path]:
         found: list[Path] = []
@@ -227,7 +320,8 @@ class TranscriptWatcher:
                 continue
             if stat.st_size != st.size or stat.st_mtime != st.mtime:
                 st.size, st.mtime = stat.st_size, stat.st_mtime
-                lines = read_tail(path)
+                lines = read_tail_adaptive(path, stat.st_size)
+                st.entrypoint = session_entrypoint(lines) or st.entrypoint
                 compact = latest_compact_marker(lines)
                 if compact is not None and compact != st.compact_marker:
                     st.compact_marker = compact
@@ -235,34 +329,65 @@ class TranscriptWatcher:
                 phase = classify_tail(lines)
                 if phase is None:
                     continue
-                was_busy = st.phase is not None and st.phase.busy
-                if phase.busy and (not was_busy or st.waiting):
-                    self._emit(AgentEvent.BUSY, path)
-                    st.last_busy_emit = now
-                elif not phase.busy and was_busy:
-                    interrupted = phase is TurnPhase.INTERRUPTED
-                    self._emit(AgentEvent.INTERRUPTED if interrupted else AgentEvent.DONE, path)
-                st.phase = phase
-                st.waiting = False
+                st.tool_key, names = pending_tool(lines) if phase is TurnPhase.TOOL else (None, ())
+                if st.in_wait and phase is TurnPhase.TOOL and st.tool_key == st.wait_id:
+                    pass  # Still the same tool call (only progress / metadata records were added)
+                else:
+                    was_busy = st.phase is not None and st.phase.busy
+                    if phase.busy and (not was_busy or st.in_wait):
+                        self._emit(AgentEvent.BUSY, path)
+                        st.last_busy_emit = now
+                    elif not phase.busy and was_busy:
+                        interrupted = phase is TurnPhase.INTERRUPTED
+                        self._emit(AgentEvent.INTERRUPTED if interrupted else AgentEvent.DONE, path)
+                    st.phase = phase
+                    st.end_wait()
+                self._notify_interactive(path, st, names)
+            if (
+                st.phase is TurnPhase.TOOL
+                and self.hint_enabled
+                and not st.notified
+                and not st.hinted
+                and now - st.mtime >= PERMISSION_HINT_S
+            ):
+                st.hinted = True
+                st.wait_id = st.tool_key
+                self._emit(AgentEvent.HINT, path, AttentionKind.HINT)
             if st.phase is TurnPhase.TOOL and not st.waiting and now - st.mtime >= TOOL_WAIT_S:
                 st.waiting = True
+                st.wait_id = st.tool_key
                 self._emit(AgentEvent.WAITING, path)
             if (
                 st.phase is not None
                 and st.phase.busy
-                and not st.waiting
+                and not st.in_wait
                 and now - st.mtime <= BUSY_FRESH_S
                 and now - st.last_busy_emit >= BUSY_REFRESH_S
             ):
                 self._emit(AgentEvent.BUSY, path)
                 st.last_busy_emit = now
 
+    def _notify_interactive(self, path: Path, st: _Tracked, names: tuple[str, ...]) -> None:
+        """ExitPlanMode / AskUserQuestion: the session now waits on the user, so say so right away.
+
+        Checked on every write while stopped on a tool call (not only on entering it), so a
+        record whose ``stop_reason`` arrives in a later write is still caught.
+        """
+        if st.phase is not TurnPhase.TOOL or st.notified:
+            return
+        kind = interactive_kind(names)
+        if kind is None:
+            return
+        st.notified = True
+        st.wait_id = st.tool_key
+        self._emit(AgentEvent.ATTENTION, path, kind)
+
     def _first_sight(self, path: Path, now: float) -> None:
         try:
             stat = path.stat()
         except OSError:
             return
-        lines = read_tail(path)
+        lines = read_tail_adaptive(path, stat.st_size)
         phase = classify_tail(lines)
         st = _Tracked(
             size=stat.st_size,
@@ -270,13 +395,20 @@ class TranscriptWatcher:
             phase=phase,
             last_busy_emit=float("-inf"),
             compact_marker=latest_compact_marker(lines),  # Old compactions are not news
+            entrypoint=session_entrypoint(lines),
         )
-        if phase is not None and phase.busy and now - stat.st_mtime <= STARTUP_FRESH_S:
+        self._tracked[path] = st
+        names: tuple[str, ...] = ()
+        if phase is TurnPhase.TOOL:
+            st.tool_key, names = pending_tool(lines)
+        if interactive_kind(names) is not None:
+            # A plan / question still waiting for an answer is news however long it has waited
+            self._notify_interactive(path, st, names)
+        elif phase is not None and phase.busy and now - stat.st_mtime <= STARTUP_FRESH_S:
             self._emit(AgentEvent.BUSY, path)
             st.last_busy_emit = now
         elif phase is not None and phase.busy:
             st.phase = None  # Stale busy session: wait for a fresh write before reacting
-        self._tracked[path] = st
 
     def _run(self) -> None:
         while not self._stop.wait(POLL_INTERVAL_S):

@@ -59,6 +59,11 @@ class PetState(str, Enum):
     MAIL_WAIT = "hold_mail"        # Hold the envelope up near the cursor until clicked
     MAIL_GIVE = "give_mail"        # Hand the envelope over (then Claude Desktop comes to the front)
     LISTEN = "listen_tilt"         # Tilt the head toward Claude's window while you type into it
+    # Notifications: Claude waits for a plan review, an answer or a permission (the strip shown
+    # depends on what it waits for; these values are the plan versions)
+    NOTIFY = "notify_plan"         # Hold the sign up where Clawd stands
+    NOTIFY_SEEK = "walk_notify_plan"  # Unanswered: carry the sign over to the cursor
+    NOTIFY_WAIT = "notify_wait"    # Hold the sign up next to the cursor (renders notify_*)
 
     @property
     def animation_name(self) -> str:
@@ -67,4 +72,6 @@ class PetState(str, Enum):
             return PetState.FALLING.value
         if self is PetState.CHASE_CURSOR or self is PetState.ENTER_WALK:
             return PetState.WANDER.value
+        if self is PetState.NOTIFY_WAIT:
+            return PetState.NOTIFY.value
         return self.value

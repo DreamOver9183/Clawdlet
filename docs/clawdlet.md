@@ -75,6 +75,11 @@
     * **道別 `GOODBYE`**：Tray 的 Exit 先揮手道別（1.2 秒，最多等 2 秒）；在空中、被抓著或爬牆時直接結束，Ctrl+C 與 `--duration` 也立即結束。
     * **送信 `MAIL_CARRY` → `MAIL_WAIT` → `MAIL_GIVE`**（Desktop Goose 風格）：Claude Code 回合結束時，如果使用者已離開 ≥ `mail_away_s`（30 秒），先不慶祝、改存一封信；使用者回來後 Clawd 帶著信封走到游標附近舉著，點一下就把信交出去，接著把 Claude Desktop 拉到前景並慶祝。開始送信後 90 秒沒人收、或同一個 session 又開始忙，信就作廢。送信優先於打字（拋球除外）。
     * **傾聽 `LISTEN`**：Claude Desktop 在前景、游標靜止，而使用者的閒置時間卻一再歸零（2 秒內 ≥ 3 次）時，代表正在打字，Clawd 會朝視窗歪頭聽；輸入停下 1.5 秒後恢復。只知道「有輸入發生」，從不讀取按鍵（不用 `GetAsyncKeyState`，也不裝鍵盤 hook）。
+11. **需要我時通知 `NOTIFY` → `NOTIFY_SEEK` → `NOTIFY_WAIT`**：Claude Code 停下來等使用者時，Clawd 依原因舉出不同的牌子——plan 審核（`ExitPlanMode`）舉計畫卷軸、發問（`AskUserQuestion`、MCP elicitation）頭上跳「?」、工具授權舉金色鑰匙。
+    * **來源**：hooks（`PreToolUse` 的 `tool_name`、`Notification` 的 `notification_type`、`PermissionRequest`）；沒裝 hooks 時由 transcript 推測：等待中 `tool_use` 的名稱可直接認出 plan／發問；其他工具安靜 8 秒只算「可能在等你」（HINT），淡色「…」泡泡，不升級、30 秒後消失。HINT 不改變忙碌狀態，打字時以 `typing_hint` 疊在筆電上方，25 秒的 WAITING 仍照舊收筆電。
+    * **升級**：Claude Desktop 不在前景時連續 10 秒（`alert_escalate_s`）沒反應，就拿著牌子走到游標旁並跟著游標；Desktop 回到前景就停在原地。點 Clawd 會把 Claude Desktop 拉到前景，這次等待不再重播。
+    * **合併**：同一個 session 一次等待內，plan／發問比授權具體，不論先後都顯示 plan／發問；HINT 遇到真的通知就升級並重新顯示。多個 session 同時等待時：授權 > 發問 > plan > HINT。該 session 有任何後續動作（BUSY、DONE、INTERRUPTED…）就結束等待；plan／發問／授權 600 秒、HINT 30 秒後自動放棄。
+    * **並存**：hook session 仍接受 transcript 認出的 plan／發問（保底）；transcript 的 BUSY 只清除 transcript 自己報的等待。Claude Desktop 的 Code 分頁是否會送 `permission_prompt`、拒絕後是否送 `PostToolUse` 尚未實機確認，暫採保守預設（`DESKTOP_SENDS_PERMISSION_HOOK = False`、`DESKTOP_HOOK_CLEARS_ON_REJECT = False`），Desktop session 因此也會收到 HINT。
 
 ### 3.2 簡化 2D 物理模型
 為確保桌寵移動與拋擲手感自然，渲染迴圈固定於 $\Delta t \approx 16.67\text{ ms}$（即 $60\text{ FPS}$），套用基礎運動學公式：

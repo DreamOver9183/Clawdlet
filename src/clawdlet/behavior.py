@@ -7,7 +7,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import random
 
-from clawdlet.agent_events import HOOK_SOURCE, AgentActivity, AgentEvent
+from clawdlet.agent_events import (
+    DESKTOP_HOOK_CLEARS_ON_REJECT,
+    DESKTOP_SENDS_PERMISSION_HOOK,
+    HOOK_SOURCE,
+    AgentActivity,
+    AgentEvent,
+    AttentionKind,
+)
 from clawdlet.behavior_table import (
     WORK_BREAK_TRIGGER,
     BehaviorRow,
@@ -80,6 +87,12 @@ RENDER_OVERRIDE_ANIMATIONS = (
     "laptop_spin",
     "laptop_wall_hit",
     "molt_shell",
+    "notify_question",
+    "notify_permission",
+    "notify_hint",
+    "typing_hint",
+    "walk_notify_question",
+    "walk_notify_permission",
 )
 
 
@@ -99,6 +112,9 @@ _REST_STATES = frozenset({PetState.IDLE, PetState.BLOB, PetState.PERCH_CLAUDE, *
 
 # Mail delivery (Desktop Goose style): carry the envelope to the cursor, hold it up, hand it over
 _MAIL_STATES = frozenset({PetState.MAIL_CARRY, PetState.MAIL_WAIT, PetState.MAIL_GIVE})
+
+# Notifications: hold the sign up, carry it over to the cursor, hold it up next to the cursor
+_NOTIFY_STATES = frozenset({PetState.NOTIFY, PetState.NOTIFY_SEEK, PetState.NOTIFY_WAIT})
 
 # Resting states that idly glance around and blink (L1 fidgets, cosmetic only)
 _FIDGET_STATES = frozenset({PetState.IDLE, PetState.PERCH_CLAUDE})
@@ -178,6 +194,7 @@ _PERCH_TICK_STATES = frozenset({
     *_LAPTOP_STATES,
     *_STATIONARY_STATES,
     *_MAIL_STATES,
+    *_NOTIFY_STATES,
     PetState.LISTEN,
 })
 
@@ -274,6 +291,31 @@ class MailState:
     delivered_at: float | None = None  # When Clawd set off with it (the timeout counts from here)
 
 
+# What a waiting session needs from the user. A plan review or a question says more than a
+# permission prompt (ExitPlanMode may also raise one), so within one wait they win; a HINT is only
+# a guess and gives way to anything. Across sessions the display order is _NOTIFY_PRIORITY.
+_SPECIFIC_KINDS = frozenset({AttentionKind.PLAN, AttentionKind.QUESTION})
+_HIGH_KINDS = frozenset({AttentionKind.PLAN, AttentionKind.QUESTION, AttentionKind.PERMISSION})
+_NOTIFY_PRIORITY = {
+    AttentionKind.PERMISSION: 3,
+    AttentionKind.QUESTION: 2,
+    AttentionKind.PLAN: 1,
+    AttentionKind.HINT: 0,
+}
+NOTIFY_ORIGIN_HOOK = "hook"
+NOTIFY_ORIGIN_TRANSCRIPT = "transcript"
+
+
+@dataclass
+class PendingNotify:
+    """One session's wait on the user, from its first ATTENTION / HINT until it carries on."""
+
+    kind: AttentionKind
+    origin: str          # NOTIFY_ORIGIN_HOOK or NOTIFY_ORIGIN_TRANSCRIPT (hook wins when both)
+    since: float         # Timeouts and the escalation timer of a fresh display count from here
+    acknowledged: bool = False  # Clicked: not shown again during this wait (unless a HINT turns real)
+
+
 def _no_focus(_hwnd: int) -> None:
     """Default window focuser: tests and headless controllers never steal focus."""
 
@@ -353,6 +395,11 @@ class ClawdletController:
     MAIL_GIVE_S: float = 0.80            # give_mail: 4 frames @ 5 FPS
     MAIL_TIMEOUT_S: float = 90.0         # Undelivered this long after setting off: the letter is gone
     LISTEN_LINGER_S: float = 1.50        # Stop listening this long after the last input pulse
+    # Notifications (plan review, question, permission, the transcript's "maybe waiting" hint)
+    NOTIFY_TIMEOUT_S: float = 600.0      # A plan / question / permission is given up after this long
+    NOTIFY_HINT_TIMEOUT_S: float = 30.0  # A hint only lingers this long (long tool runs look alike)
+    NOTIFY_SEEK_SPEED_MULT: float = 1.40
+    NOTIFY_HOOK_CLEAR_GRACE_S: float = 2.0  # A transcript BUSY this soon after a hook alert is stale
 
     def __init__(
         self,
@@ -485,6 +532,14 @@ class ClawdletController:
         self._enter_side: int = -1
         self._input_pulses: deque[float] = deque()
         self._last_pulse_t: float = float("-inf")
+
+        # Notifications: pending waits per session and the one on display
+        self.notify_enabled: bool = True
+        self._notify: dict[str, PendingNotify] = {}
+        self._notify_session: str | None = None
+        self._notify_kind: AttentionKind | None = None
+        self._notify_escalate_t: float = 0.0  # Time away from Claude Desktop while holding the sign
+        self.debug_events: deque[str] = deque(maxlen=20)  # The app prints these with --debug
 
     @property
     def profile(self) -> ActivityProfile:
@@ -806,6 +861,196 @@ class ClawdletController:
         ):
             self._return_to_rest(win)
 
+    # --- Notifications: plan review, question, permission, "maybe waiting" hint -----------------
+
+    def set_notify_enabled(self, enabled: bool) -> None:
+        """Toggle notifications; turning them off forgets every pending wait."""
+        self.notify_enabled = bool(enabled)
+        if not self.notify_enabled:
+            self._notify.clear()
+            self._notify_session = None
+            if self.state in _NOTIFY_STATES:
+                self._return_to_rest(self._last_win)
+
+    def describe_notify(self) -> str:
+        """One-line summary for --debug, e.g. ``notify=[3f2a91c0 plan hook 12s ack]``."""
+        items = []
+        for session_id, p in self._notify.items():
+            item = f"{session_id[:8]} {p.kind.value} {p.origin} {max(0.0, self._clock - p.since):.0f}s"
+            items.append(item + (" ack" if p.acknowledged else ""))
+        return f"notify=[{', '.join(items)}]"
+
+    def _note_notify(self, session_id: str, kind: AttentionKind, origin: str) -> None:
+        """Merge a session's new ATTENTION / HINT into its current wait (see _SPECIFIC_KINDS)."""
+        p = self._notify.get(session_id)
+        if p is None:
+            self._notify[session_id] = PendingNotify(kind, origin, self._clock)
+            return
+        if origin == NOTIFY_ORIGIN_HOOK:
+            p.origin = NOTIFY_ORIGIN_HOOK
+        if kind == AttentionKind.HINT or kind == p.kind:
+            return  # A guess never downgrades; the same news again changes nothing
+        if p.kind == AttentionKind.HINT:
+            # The guess turned out real: a fresh wait, shown again even if the hint was clicked
+            p.kind, p.since, p.acknowledged = kind, self._clock, False
+        elif p.kind == AttentionKind.PERMISSION and kind in _SPECIFIC_KINDS:
+            p.kind = kind  # The prompt is for a plan / question: say which
+        # Otherwise a plan / question stays as it is (a permission prompt adds nothing to it)
+
+    def _end_notify(self, session_id: str, transcript_only: bool = False) -> None:
+        """The session carried on: its wait is over (``transcript_only``: only a guessed one)."""
+        p = self._notify.get(session_id)
+        if p is None:
+            return
+        if transcript_only and p.origin == NOTIFY_ORIGIN_HOOK:
+            return
+        del self._notify[session_id]
+
+    def _expire_notify(self) -> None:
+        for session_id, p in list(self._notify.items()):
+            limit = self.NOTIFY_HINT_TIMEOUT_S if p.kind == AttentionKind.HINT else self.NOTIFY_TIMEOUT_S
+            if self._clock - p.since >= limit:
+                del self._notify[session_id]
+
+    def _best_notify(self) -> tuple[str, PendingNotify] | None:
+        """The unacknowledged wait to show: highest priority, then the oldest."""
+        if not self.notify_enabled:
+            return None
+        best: tuple[str, PendingNotify] | None = None
+        for session_id, p in self._notify.items():
+            if p.acknowledged:
+                continue
+            if best is None or (_NOTIFY_PRIORITY[p.kind], -p.since) > (
+                _NOTIFY_PRIORITY[best[1].kind], -best[1].since
+            ):
+                best = (session_id, p)
+        return best
+
+    def _notify_due(self, high_only: bool = False) -> bool:
+        """A wait should be shown now (a HINT only while there is no typing to do)."""
+        best = self._best_notify()
+        if best is None:
+            return False
+        if best[1].kind in _HIGH_KINDS:
+            return True
+        return not high_only and not self._work_wanted()
+
+    def _hint_overlay(self) -> bool:
+        """Typing with a "maybe waiting" hint on top (typing_hint): the laptop stays out."""
+        best = self._best_notify()
+        return best is not None and best[1].kind == AttentionKind.HINT
+
+    def _start_notify(self) -> None:
+        """Hold up the sign for the best pending wait, right where Clawd is."""
+        best = self._best_notify()
+        if best is None:
+            return
+        self._notify_session, self._notify_kind = best[0], best[1].kind
+        self._notify_escalate_t = 0.0
+        self.manual_typing = False
+        self._seeking_claude = False
+        self._seeking_push = False
+        self._push_plan = None
+        self.body.vx = 0.0
+        self._set_state(PetState.NOTIFY, self.NOTIFY_TIMEOUT_S)
+
+    def _show_notify_if_possible(self, win: WindowSnapshot | None) -> None:
+        """React to a new wait now if Clawd can; otherwise a rest transition picks it up later."""
+        if self.state in _NOTIFY_STATES or not self._can_react() or not self._notify_due():
+            return
+        best = self._best_notify()
+        assert best is not None
+        if best[1].kind == AttentionKind.HINT:
+            # Only a guess: never interrupts work (typing_hint shows it), an alert, a nap or
+            # anything else going on
+            if self.state in _WORK_ENTRY_STATES and self.state not in (PetState.YAWN, PetState.SLEEP):
+                self._start_notify()
+            return
+        if self.state in _WORK_STATES:
+            if not self._still_working(win):
+                self._start_stop_typing()
+            return  # _step_work puts the laptop away for it otherwise
+        if self.state in (PetState.PUT_AWAY_LAPTOP, PetState.KICK_LAPTOP) or self.state in _MAIL_STATES:
+            return  # Finish first; the rest transition shows it
+        self._start_notify()
+
+    def _acknowledge_notify(self) -> None:
+        """Clicked while showing a wait: bring Claude Desktop forward and mark it as seen."""
+        best = self._best_notify()
+        session_id = self._notify_session if self.state in _NOTIFY_STATES else None
+        p = self._notify.get(session_id) if session_id is not None else None
+        if p is None and best is not None:
+            session_id, p = best
+        if p is not None:
+            p.acknowledged = True
+        hwnd = self._claude_hwnd_hint
+        if hwnd is None:
+            self.debug_events.append("notify click: no Claude window to focus")
+        else:
+            ok = self.window_focuser(hwnd)
+            self.debug_events.append(f"notify click: focus 0x{hwnd:x} -> {ok}")
+        self._notify_session = None
+
+    def _step_notify_seek(self, dt: float, win: WindowSnapshot | None, perched: bool) -> None:
+        """Carry the sign over to the cursor (along the title bar when perched)."""
+        if self._pointer is None:
+            self.body.vx = 0.0
+            return
+        if perched:
+            assert win is not None
+            arrived = self._perch_step_toward_cursor(dt, win, self.NOTIFY_SEEK_SPEED_MULT)
+        else:
+            arrived = self._floor_step_toward_cursor(dt, self.NOTIFY_SEEK_SPEED_MULT)
+        if arrived:
+            self.body.vx = 0.0
+            self._set_state(PetState.NOTIFY_WAIT, self.NOTIFY_TIMEOUT_S)
+
+    def _advance_notify(self, win: WindowSnapshot | None, dt: float) -> None:
+        """Follow the best pending wait: switch signs, escalate to the cursor, or stand down."""
+        best = self._best_notify()
+        if best is None or (best[1].kind == AttentionKind.HINT and self._work_wanted()):
+            self._notify_session = None
+            self._return_to_rest(win)  # Nothing left to show (or a hint while there is typing to do)
+            return
+        session_id, p = best
+        if session_id != self._notify_session or p.kind != self._notify_kind:
+            switched = session_id != self._notify_session
+            self._notify_session, self._notify_kind = session_id, p.kind
+            if self.state == PetState.NOTIFY or (switched and p.kind == AttentionKind.HINT):
+                self._notify_escalate_t = 0.0
+                if self.state != PetState.NOTIFY:
+                    self._set_state(PetState.NOTIFY, self.NOTIFY_TIMEOUT_S)
+        desktop_up = win is not None and win.foreground
+        if desktop_up:
+            self._notify_escalate_t = 0.0  # The user is looking at Claude: no need to come over
+            if self.state in (PetState.NOTIFY_SEEK, PetState.NOTIFY_WAIT):
+                self.body.vx = 0.0
+                self._set_state(PetState.NOTIFY, self.NOTIFY_TIMEOUT_S)
+            return
+        self._notify_escalate_t += dt
+        if self.state == PetState.NOTIFY:
+            self.body.vx = 0.0
+            if (
+                p.kind in _HIGH_KINDS
+                and self._pointer is not None
+                and self._notify_escalate_t >= self.behavior_table.settings.alert_escalate_s
+            ):
+                self._set_state(PetState.NOTIFY_SEEK, self.NOTIFY_TIMEOUT_S)
+        elif self.state == PetState.NOTIFY_WAIT:
+            self.body.vx = 0.0
+            ptr = self._pointer
+            if ptr is not None and abs(ptr.x - self.body.center_x) > 1.0:
+                self.facing = 1 if ptr.x > self.body.center_x else -1
+            target = self._cursor_target_x(win, perched=self._perched_hwnd is not None)
+            if target is not None and abs(target - self.body.x) > max(self.body.width * 1.5, 120.0):
+                self._set_state(PetState.NOTIFY_SEEK, self.NOTIFY_TIMEOUT_S)  # Follow the cursor
+
+    def _notify_animation(self) -> str:
+        kind = self._notify_kind or AttentionKind.PLAN
+        if self.state == PetState.NOTIFY_SEEK and kind in _HIGH_KINDS:
+            return f"walk_notify_{kind.value}"
+        return f"notify_{kind.value}"
+
     def hop(self, jump_vy: float = -650.0) -> None:
         """Trigger a playful vertical hop from the current position."""
         self.manual_typing = False
@@ -935,6 +1180,13 @@ class ClawdletController:
         if self.state in (PetState.MAIL_CARRY, PetState.MAIL_WAIT):
             self._give_mail()  # Takes the letter; Claude Desktop comes to the front after the hand-over
             return True
+        if self.state in _NOTIFY_STATES:
+            self._acknowledge_notify()  # Claude Desktop comes to the front
+            self._set_state(PetState.POKED)
+            return True
+        if self.state == PetState.TYPING and self._hint_overlay():
+            self._acknowledge_notify()  # The "maybe waiting" bubble: look at Claude, keep typing
+            return True
         if self.state in _WORK_STATES:
             self._start_poke_glance()
             return True
@@ -951,8 +1203,8 @@ class ClawdletController:
 
     def flail(self) -> bool:
         """Rapid clicks: throw a tantrum. Return True if it reacted."""
-        if self.state in _MAIL_STATES:
-            return self.poke()  # Clicking away at the letter still takes it
+        if self.state in _MAIL_STATES or self.state in _NOTIFY_STATES:
+            return self.poke()  # Clicking away at the letter / sign still takes it
         if not self._can_react() or self.state in _LAPTOP_STATES or self.state == PetState.MOLT:
             return False
         self._alert_session = None
@@ -963,7 +1215,7 @@ class ClawdletController:
         """Stroking: glow with hearts; repeated strokes keep it going. Return True if it reacted."""
         if not self._can_react() or self.state in _LAPTOP_STATES or self.state in _MAIL_STATES:
             return False
-        if self.state in (PetState.FLAIL, PetState.ALERT, PetState.MOLT):
+        if self.state in (PetState.FLAIL, PetState.ALERT, PetState.MOLT) or self.state in _NOTIFY_STATES:
             return False
         if self.state == PetState.PETTED:
             self._state_timer = 0.0
@@ -971,18 +1223,30 @@ class ClawdletController:
         self._set_state(PetState.PETTED)
         return True
 
-    def handle_agent_event(self, event: AgentEvent, session_id: str, source: str = HOOK_SOURCE) -> None:
+    def handle_agent_event(
+        self,
+        event: AgentEvent,
+        session_id: str,
+        source: str = HOOK_SOURCE,
+        kind: AttentionKind | None = None,
+        desktop: bool = False,
+    ) -> None:
         """React to a Claude Code activity event (busy typing is picked up through the work session).
 
         Hooks are authoritative: once a session has sent a hook event, transcript-derived events
-        for it are dropped so the two sources can never double-celebrate or flip-flop. The one
-        exception is INTERRUPTED, which only the transcript can see (no Stop hook fires on Esc).
-        (So a transcript ``compact_boundary`` only molts sessions without hooks: PreCompact covers
-        the others.)
+        for it are dropped so the two sources can never double-celebrate or flip-flop. The
+        exceptions: INTERRUPTED, which only the transcript can see (no Stop hook fires on Esc);
+        a plan / question the transcript spots (in case no hook announced it); the quiet-tool
+        HINT for Claude Desktop sessions (see DESKTOP_SENDS_PERMISSION_HOOK); and a BUSY, which
+        only ends a wait the transcript itself reported. (So a transcript ``compact_boundary``
+        only molts sessions without hooks: PreCompact covers the others.)
         """
+        if event == AgentEvent.ATTENTION and kind is None:
+            kind = AttentionKind.GENERIC
         if source == HOOK_SOURCE:
             self.agent.hook_sessions.add(session_id)
         elif session_id in self.agent.hook_sessions and event != AgentEvent.INTERRUPTED:
+            self._handle_transcript_for_hook_session(event, session_id, kind, desktop)
             return
         win = self._last_win
         was_busy = self.agent.note(event, session_id, self._clock, source)
@@ -998,13 +1262,27 @@ class ClawdletController:
             self._drop_mail(win)  # That session is at it again: the letter is out of date
 
         # Any follow-up from the session that raised the alert means it is no longer waiting
-        if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING) and session_id == self._alert_session:
+        if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING, AgentEvent.HINT, AgentEvent.COMPACT):
+            self._end_notify(session_id)
+        if event not in (AgentEvent.ATTENTION, AgentEvent.WAITING, AgentEvent.HINT) and session_id == self._alert_session:
             self._alert_session = None
             if self.state == PetState.ALERT:
                 self._return_to_rest(win)
 
-        if event == AgentEvent.ATTENTION:
-            if self._can_react():
+        if event == AgentEvent.ATTENTION and kind in _HIGH_KINDS and self.notify_enabled:
+            origin = NOTIFY_ORIGIN_HOOK if source == HOOK_SOURCE else NOTIFY_ORIGIN_TRANSCRIPT
+            self._note_notify(session_id, kind, origin)
+            self._show_notify_if_possible(win)
+        elif event == AgentEvent.ATTENTION and kind in _HIGH_KINDS and source != HOOK_SOURCE:
+            pass  # Notifications are off: the transcript's guesses stay quiet
+        elif event == AgentEvent.HINT:
+            if self.notify_enabled:
+                self._note_notify(session_id, AttentionKind.HINT, NOTIFY_ORIGIN_TRANSCRIPT)
+                self._show_notify_if_possible(win)
+        elif event == AgentEvent.ATTENTION:
+            # The plain '!' (any other notification, or a hook's prompt with notifications off);
+            # an unanswered plan / question / permission is not interrupted for it
+            if self._can_react() and self._best_notify() is None:
                 self._alert_session = session_id
                 self._set_state(PetState.ALERT)
         elif event == AgentEvent.ERROR:
@@ -1037,6 +1315,29 @@ class ClawdletController:
             # counting as busy, so typing winds down on its own)
             if self.state in _WORK_STATES and not self._still_working(win):
                 self._start_stop_typing()
+
+    def _handle_transcript_for_hook_session(
+        self, event: AgentEvent, session_id: str, kind: AttentionKind | None, desktop: bool
+    ) -> None:
+        """The few transcript events a hook session still listens to (see handle_agent_event)."""
+        if not self.notify_enabled:
+            return
+        win = self._last_win
+        if event == AgentEvent.ATTENTION and kind in _SPECIFIC_KINDS:
+            self._note_notify(session_id, kind, NOTIFY_ORIGIN_TRANSCRIPT)
+            self._show_notify_if_possible(win)
+        elif event == AgentEvent.HINT and desktop and not DESKTOP_SENDS_PERMISSION_HOOK:
+            self._note_notify(session_id, AttentionKind.HINT, NOTIFY_ORIGIN_TRANSCRIPT)
+            self._show_notify_if_possible(win)
+        elif event == AgentEvent.BUSY:
+            p = self._notify.get(session_id)
+            stale_hook_alert = (
+                p is not None
+                and desktop
+                and not DESKTOP_HOOK_CLEARS_ON_REJECT
+                and self._clock - p.since > self.NOTIFY_HOOK_CLEAR_GRACE_S
+            )
+            self._end_notify(session_id, transcript_only=not stale_hook_alert)
 
     def _note_error(self, session_id: str) -> int:
         """Count a tool failure into the session's streak; return its place in the streak."""
@@ -1283,6 +1584,10 @@ class ClawdletController:
         self._work_directive = WorkDirective.NONE
         state = self.state
         if state in _WORK_STATES:
+            if not self.manual_typing and self._notify_due(high_only=True):
+                # Claude waits for a plan review / answer / permission: that beats any typing
+                self._start_stop_typing()
+                return True
             if state != PetState.JUGGLE and not self.manual_typing and self._mail_due():
                 # The user is back and a letter is waiting: it beats typing (not juggling)
                 self._start_stop_typing()
@@ -1301,7 +1606,12 @@ class ClawdletController:
                 self._resume_typing()
                 return True
             return False
-        if state in _WORK_ENTRY_STATES and self._work_wanted() and not self._mail_due():
+        if (
+            state in _WORK_ENTRY_STATES
+            and self._work_wanted()
+            and not self._mail_due()
+            and not self._notify_due(high_only=True)
+        ):
             if self.manual_typing:
                 self._enter_manual_typing()
             else:
@@ -1379,6 +1689,9 @@ class ClawdletController:
         Also delivers a waiting letter once the user is back, and listens while they type into
         Claude Desktop. Return True when the state changed.
         """
+        if self._notify_due():
+            self._start_notify()
+            return True
         if self._mail_due():
             self._start_mail_carry()
             return True
@@ -1897,6 +2210,9 @@ class ClawdletController:
             # Double-clicked again while putting the laptop away: pull it straight back out
             self._enter_manual_typing()
             return
+        if self._notify_due():
+            self._start_notify()
+            return
         if self._mail_due():
             self._start_mail_carry()
             return
@@ -1956,6 +2272,9 @@ class ClawdletController:
         chain_from = self._take_active_row()
         if self.manual_typing:
             self._enter_manual_typing()
+            return
+        if self._notify_due():
+            self._start_notify()
             return
         if self._mail_due():
             self._start_mail_carry()
@@ -2097,6 +2416,8 @@ class ClawdletController:
             self._step_perch_chase(dt, win)
         elif self.state == PetState.MAIL_CARRY:
             self._step_mail_carry(dt, win, perched=True)
+        elif self.state == PetState.NOTIFY_SEEK:
+            self._step_notify_seek(dt, win, perched=True)
         elif self.state == PetState.WANDER:
             step_dx = float(self.facing) * (self.effective_walk_speed * 0.75) * dt
             self._perch_offset_x += step_dx
@@ -2128,6 +2449,8 @@ class ClawdletController:
             self._advance_juggle(win)
         elif self.state in _MAIL_STATES:
             self._advance_mail(win)
+        elif self.state in _NOTIFY_STATES:
+            self._advance_notify(win, dt)
         elif self.state == PetState.LISTEN:
             self._advance_listen(win)
         elif self._state_timer >= self._decision_duration:
@@ -2230,6 +2553,7 @@ class ClawdletController:
         self._last_win = win
         if win is not None and win.is_perchable:
             self._claude_hwnd_hint = win.hwnd
+        self._expire_notify()
         self._tick_projectile(dt)
         self._tick_shell(dt, win)
         # Work session first: the perch / floor paths below apply its directive via _step_work
@@ -2290,6 +2614,10 @@ class ClawdletController:
         if on_floor and self.state == PetState.MAIL_CARRY:
             self._step_mail_carry(dt, win, perched=False)
         if on_floor and self.state in (PetState.MAIL_WAIT, PetState.MAIL_GIVE, PetState.LISTEN):
+            self.body.vx = 0.0
+        if on_floor and self.state == PetState.NOTIFY_SEEK:
+            self._step_notify_seek(dt, win, perched=False)
+        if on_floor and self.state in (PetState.NOTIFY, PetState.NOTIFY_WAIT):
             self.body.vx = 0.0
         if on_floor and self.state == PetState.WANDER and self._seeking_push:
             self._step_seek_push(dt, win)
@@ -2377,6 +2705,8 @@ class ClawdletController:
                 self._advance_reaction(win)
             elif self.state in _MAIL_STATES:
                 self._advance_mail(win)
+            elif self.state in _NOTIFY_STATES:
+                self._advance_notify(win, dt)
             elif self.state == PetState.LISTEN:
                 self._advance_listen(win)
             elif self.body.on_platform_id == "claude_window" and win is not None and win.is_perchable:
@@ -2505,8 +2835,12 @@ class ClawdletController:
         animation_name = self.state.animation_name
         if self.state == PetState.ALERT:
             animation_name = self._alert_animation()
+        if self.state in _NOTIFY_STATES:
+            animation_name = self._notify_animation()
         if self.state == PetState.TYPING and self._typing_resumed:
             animation_name = "typing_loop"  # Laptop already out: skip the intro frames
+        if self.state == PetState.TYPING and self._hint_overlay():
+            animation_name = "typing_hint"  # Typing on, with a "maybe waiting on you" bubble
         if self.state == PetState.PEEK_EDGE and self._cursor_near(120.0):
             animation_name = "peek_out"
         frame_index = self._gaze_frame(win)

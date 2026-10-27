@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
+
 from PIL import Image
 
 # Exact palette sampled from docs/clawd.png:
@@ -2521,6 +2523,154 @@ def _build_listen_tilt() -> list[Image.Image]:
     return frames
 
 
+# --- Notifications: plan review, question, permission and the gentle "maybe waiting" hint --------
+
+HINT_DOT = (196, 204, 222, 255)       # Soft grey-blue "..." dots (quieter than the golden '!')
+KEY_SHADE = (196, 150, 34, 255)       # Key teeth / ring shadow under STAR_GOLD
+CHECK_GREEN = (92, 186, 104, 255)     # Tick marks on the plan sheet
+
+
+def _draw_plan_sheet(grid: Grid, left_x: int, right_x: int, top: int) -> None:
+    """Unrolled plan scroll (rollers at left_x / right_x, 6 rows tall) with three green ticks."""
+    bottom = top + 5
+    _rect(grid, left_x + 1, top, right_x - left_x - 1, bottom - top + 1, PARCHMENT)
+    for i, ly in enumerate((top + 1, top + 3, top + 5)):
+        if ly > bottom:
+            break
+        _px(grid, left_x + 2, ly, CHECK_GREEN)
+        _px(grid, left_x + 3, ly - 1 if i < 2 else ly, CHECK_GREEN)
+        _rect(grid, left_x + 5, ly, max(1, right_x - left_x - 7 - i), 1, SCROLL_INK)
+    for rx in (left_x, right_x):
+        _rect(grid, rx, top - 1, 1, bottom - top + 3, SCROLL_BROWN)
+
+
+def _draw_key(grid: Grid, x: int, y: int) -> None:
+    """7x5 golden key, ring on the left (top-left corner at (x, y)), teeth hanging off the shaft."""
+    _rect(grid, x, y, 3, 3, STAR_GOLD)
+    _px(grid, x + 1, y + 1, TRANSPARENT)
+    _rect(grid, x + 3, y + 1, 4, 1, STAR_GOLD)
+    _px(grid, x + 5, y + 2, KEY_SHADE)
+    _rect(grid, x + 6, y + 2, 1, 2, KEY_SHADE)
+
+
+def _draw_question_card(grid: Grid, x: int, y: int) -> None:
+    """9x9 parchment card with a golden '?' on it (the question sign Clawd carries)."""
+    _rect(grid, x, y, 9, 9, PARCHMENT)
+    _rect(grid, x, y + 8, 9, 1, ENVELOPE_FOLD)
+    _draw_question(grid, x + 2, y + 1)
+
+
+def _draw_hint_dots(grid: Grid, x: int, y: int, count: int = 3) -> None:
+    """Up to three 2x2 soft dots ('...') starting at (x, y)."""
+    for i in range(count):
+        _rect(grid, x + i * 4, y, 2, 2, HINT_DOT)
+
+
+def _build_notify_plan() -> list[Image.Image]:
+    """4-frame loop holding an unrolled plan (with ticks) high overhead in both claws, bobbing."""
+    frames: list[Image.Image] = []
+    for b_top, eyes in ((16, "normal"), (15, "normal"), (16, "normal"), (17, "blink")):
+        g = _new_grid()
+        _draw_canonical_clawd(g, body_top=b_top, body_height=28 - b_top, arm_w=0, eye_dy=-1, eye_mode=eyes)
+        top = b_top - 12
+        _rect(g, 6, top + 6, 2, b_top + 6 - top - 6, TERRACOTTA)
+        _rect(g, 24, top + 6, 2, b_top + 6 - top - 6, TERRACOTTA)
+        _draw_plan_sheet(g, 4, 27, top)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_notify_question() -> list[Image.Image]:
+    """4-frame loop: eyes up, one claw raised like a hand up, a big golden '?' bouncing by the head."""
+    frames: list[Image.Image] = []
+    for q_y, claw_y, eyes in ((5, 12, "normal"), (3, 11, "normal"), (5, 12, "normal"), (6, 12, "blink")):
+        g = _new_grid()
+        _draw_canonical_clawd(g, arm_w=0, eye_mode=eyes, eye_dx=-1, eye_dy=-1)
+        _rect(g, 4, 20, 4, 4, TERRACOTTA)
+        _rect(g, 24, 20, 3, 2, TERRACOTTA)
+        _rect(g, 25, claw_y + 3, 2, 20 - claw_y - 3, TERRACOTTA)
+        _rect(g, 24, claw_y, 4, 3, TERRACOTTA)
+        _draw_question(g, 4, q_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_notify_permission() -> list[Image.Image]:
+    """4-frame loop: a golden key held up high, the other claw pointing aside, the key glinting."""
+    frames: list[Image.Image] = []
+    for key_y, glint, eyes in ((5, False, "normal"), (4, True, "normal"), (5, False, "normal"), (6, True, "blink")):
+        g = _new_grid()
+        _draw_canonical_clawd(g, arm_w=0, eye_mode=eyes, eye_dx=1, eye_dy=-1)
+        _rect(g, 2, 21, 6, 2, TERRACOTTA)  # Left claw points out to the side (toward Claude)
+        _rect(g, 1, 20, 2, 4, TERRACOTTA)
+        _draw_raised_claw(g, 24, 21, key_y + 3)
+        _draw_key(g, 21, key_y)
+        if glint:
+            _draw_sparkle(g, 29, key_y - 1)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_notify_hint() -> list[Image.Image]:
+    """4 slow frames: standing calmly, glancing aside while '...' fills in above the head."""
+    frames: list[Image.Image] = []
+    for dots, eyes, edx in ((1, "normal", 1), (2, "normal", 1), (3, "normal", 1), (3, "blink", 0)):
+        g = _new_grid()
+        _draw_canonical_clawd(g, eye_mode=eyes, eye_dx=edx)
+        _draw_hint_dots(g, 11, 10, dots)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _paint_cells(img: Image.Image, cells: list[tuple[int, int]], color: tuple[int, int, int, int]) -> Image.Image:
+    """Copy of a rendered frame with the given grid cells painted over."""
+    out = img.copy()
+    px = out.load()
+    for x, y in cells:
+        for dy in range(PIXEL_SCALE):
+            for dx in range(PIXEL_SCALE):
+                px[x * PIXEL_SCALE + dx, y * PIXEL_SCALE + dy] = color
+    return out
+
+
+def _build_typing_hint() -> list[Image.Image]:
+    """typing_loop with soft '...' dots over Clawd's head: maybe waiting on you, still at the laptop."""
+    dots = [(x + dx, 10 + dy) for x in (18, 22, 26) for dx in (0, 1) for dy in (0, 1)]
+    return [_paint_cells(frame, dots, HINT_DOT) for frame in _build_typing_loop()]
+
+
+def _build_walk_notify(draw_sign: Callable[[Grid, int], None]) -> list[Image.Image]:
+    """8-frame walk_horizontal leg cycle carrying a sign overhead with both claws (like walk_mail)."""
+    frames: list[Image.Image] = []
+    for b_top, l_xs, l_bots, l_cols, _l_arm, _r_arm in _WALK_SPECS:
+        g = _new_grid()
+        _draw_canonical_clawd(
+            g, body_top=b_top, body_height=28 - b_top, arm_w=0,
+            leg_xs=l_xs, leg_bottoms=l_bots, leg_colors=l_cols, eye_dx=1,
+        )
+        sign_y = b_top - 12
+        _rect(g, 11, sign_y + 4, 2, b_top - sign_y - 4, TERRACOTTA_DARK)
+        _rect(g, 19, sign_y + 4, 2, b_top - sign_y - 4, TERRACOTTA)
+        draw_sign(g, sign_y)
+        frames.append(_grid_to_image(g))
+    return frames
+
+
+def _build_walk_notify_plan() -> list[Image.Image]:
+    return _build_walk_notify(lambda g, y: _draw_plan_sheet(g, 7, 24, y + 1))
+
+
+def _build_walk_notify_question() -> list[Image.Image]:
+    return _build_walk_notify(lambda g, y: _draw_question_card(g, 11, y))
+
+
+def _build_walk_notify_permission() -> list[Image.Image]:
+    def sign(g: Grid, y: int) -> None:
+        _rect(g, 10, y + 1, 12, 7, PARCHMENT)  # Key shown on a little card so it reads at 1x
+        _draw_key(g, 12, y + 2)
+    return _build_walk_notify(sign)
+
+
 def generate_all_sprites(output_dir: Path | None = None) -> Path:
     """Generate all authentic docs/clawd.png sprite strips, manifest.json, and clawdlet.ico."""
     if output_dir is None:
@@ -2605,6 +2755,15 @@ def generate_all_sprites(output_dir: Path | None = None) -> Path:
         "hold_mail": {"frames": _build_hold_mail(), "fps": 3.0, "loop": True},
         "give_mail": {"frames": _build_give_mail(), "fps": 5.0, "loop": False},
         "listen_tilt": {"frames": _build_listen_tilt(), "fps": 2.5, "loop": True},
+        # Notifications: what Claude is waiting for (plan review, question, permission, maybe)
+        "notify_plan": {"frames": _build_notify_plan(), "fps": 5.0, "loop": True},
+        "notify_question": {"frames": _build_notify_question(), "fps": 5.0, "loop": True},
+        "notify_permission": {"frames": _build_notify_permission(), "fps": 5.0, "loop": True},
+        "notify_hint": {"frames": _build_notify_hint(), "fps": 3.0, "loop": True},
+        "typing_hint": {"frames": _build_typing_hint(), "fps": 5.5, "loop": True},
+        "walk_notify_plan": {"frames": _build_walk_notify_plan(), "fps": 8.0, "loop": True},
+        "walk_notify_question": {"frames": _build_walk_notify_question(), "fps": 8.0, "loop": True},
+        "walk_notify_permission": {"frames": _build_walk_notify_permission(), "fps": 8.0, "loop": True},
     }
 
     manifest: dict[str, object] = {

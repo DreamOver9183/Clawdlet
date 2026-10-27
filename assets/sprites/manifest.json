@@ -358,6 +358,62 @@
       "fps": 2.5,
       "loop": true,
       "loop_start": 0
+    },
+    "notify_plan": {
+      "file": "notify_plan.png",
+      "frames": 4,
+      "fps": 5.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "notify_question": {
+      "file": "notify_question.png",
+      "frames": 4,
+      "fps": 5.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "notify_permission": {
+      "file": "notify_permission.png",
+      "frames": 4,
+      "fps": 5.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "notify_hint": {
+      "file": "notify_hint.png",
+      "frames": 4,
+      "fps": 3.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "typing_hint": {
+      "file": "typing_hint.png",
+      "frames": 8,
+      "fps": 5.5,
+      "loop": true,
+      "loop_start": 0
+    },
+    "walk_notify_plan": {
+      "file": "walk_notify_plan.png",
+      "frames": 8,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "walk_notify_question": {
+      "file": "walk_notify_question.png",
+      "frames": 8,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
+    },
+    "walk_notify_permission": {
+      "file": "walk_notify_permission.png",
+      "frames": 8,
+      "fps": 8.0,
+      "loop": true,
+      "loop_start": 0
     }
   }
 }
