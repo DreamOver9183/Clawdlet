@@ -1,226 +1,194 @@
+<p align="center"><b>English</b> | <a href="README.zh-TW.md">繁體中文</a></p>
+
 # Clawdlet
 
 ```ts
 let clawd = new WindowCompanion({ gravity: true });
 ```
 
-> ***`let clawd` roam on your Claude Desktop.***  
-> **Clawdlet** — An unofficial, fan-made physics desktop pet that perches on your Claude Desktop window (`Claude.exe`).  
-> **Clawdlet** —— 具備 2D 物理重力、視窗邊界感知（Window-Aware）且專屬於 Claude Desktop 桌面視窗的動態像素桌寵。
+> ***`let clawd` roam on your Claude Desktop.***
+> **Clawdlet** is an unofficial, fan-made physics desktop pet that perches on your Claude Desktop window (`Claude.exe`).
 
 ![Clawdlet Showcase](assets/demo/clawdlet_demo.gif)
 
 ---
 
-## ✨ Core Features | 核心特色
+## ✨ Introduction
 
-### 1. Window-Aware Claude Desktop Perching | 專屬視窗感知與標題列吸附
-- **DWM Frame Tracking**: Automatically detects your active `Claude.exe` main window (supporting both Windows Store MSIX & standard Squirrel installs while filtering out background `claude-code` CLI processes) via `DWMWA_EXTENDED_FRAME_BOUNDS` with **0px gap** perching. Its "thinking" heuristic only measures the I/O of the Claude window's own process and its network-service helper (sustained ≥ 8 KB/s), never renderers, the GPU process, node/MCP helpers or a terminal Claude Code. | 「思考中」只量 Claude 視窗本身與其網路子程序的 I/O。
-- **Autonomous Climbing & Strolling**: Clawdlet actively walks across your taskbar, climbs vertically up the side of your Claude Desktop window, and perches on top of the titlebar to peek down at your conversation.
-- **Dynamic Window Physics**:
-  - Smoothly follows the window when you drag Claude Desktop at normal speed.
-  - Drops into free-fall (`FALLING` → `LAND_SQUISH`) if the window is minimized or closed.
-  - Gets violently flung off along a ballistic arc (`THROWN` → `DIZZY` with orbiting stars) if you shake the Claude window rapidly!
+Clawdlet is a small pixel-art Clawd that lives on your Windows desktop. It has gravity, knows where your Claude Desktop window is, and reacts to what Claude is doing.
 
-### 2. Comedic Side-Profile Laptop Typing | 喜感側面掏筆電重摔打字 (`\_`)
-- When Claude Desktop is actively thinking/generating—or when you **double-click** Clawdlet—it pulls a sleek `8×2` Ultrabook out of its belly, jumps high overhead, **slams the laptop down** into a side-profile `\_` shape with shockwave sparks, and stretches out **two long arms** to hammer away at the keyboard!
-- **Work sessions (`工作節奏`, v0.3.0)**: typing comes in segments (Quiet 20–40 s, Normal 14–28 s, Hyper 8–16 s) with short breaks between them, drawn from the behavior table's `work_breaks`: Clawd **stretches** (伸懶腰), **rests its chin and thinks** with a `…` (托腮思考), **sips from a steaming mug** (喝咖啡) or glances up from the laptop. Stretching and coffee have a cooldown so they don't repeat back to back. When Claude Desktop's I/O heuristic is the only signal, typing stops after 60 s and the heuristic is ignored for the next 90 s (Claude Code hooks / transcripts still work), and for 8 s after a finished turn so the Desktop's trailing I/O doesn't restart it.
-  打字改成一段一段：每段 安靜 20–40 秒／標準 14–28 秒／過動 8–16 秒，中間從行為設定檔的 `work_breaks` 抽一種休息：伸懶腰、托腮思考（頭上「…」）、喝咖啡，或抬頭看一眼（伸懶腰與喝咖啡有冷卻時間）。只有 Claude Desktop 的 I/O 推測訊號時，最多連續打字 60 秒，之後 90 秒不理會這個訊號（Claude Code 的 hook／transcript 不受影響）；回合結束後 8 秒內也會忽略 Desktop 的 I/O 尾巴。
+<table>
+  <tr>
+    <td align="center"><img src="assets/demo/actions/walk.gif" width="132" alt="Walking"><br><sub>Strolls along the taskbar</sub></td>
+    <td align="center"><img src="assets/demo/actions/climb.gif" width="132" alt="Climbing"><br><sub>Climbs up and perches on Claude</sub></td>
+    <td align="center"><img src="assets/demo/actions/typing.gif" width="132" alt="Typing"><br><sub>Types while Claude works</sub></td>
+    <td align="center"><img src="assets/demo/actions/thrown.gif" width="132" alt="Thrown"><br><sub>Pick it up, throw it, it gets dizzy</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/demo/actions/petted.gif" width="132" alt="Petted"><br><sub>Rub the mouse over it to pet it</sub></td>
+    <td align="center"><img src="assets/demo/actions/juggle.gif" width="132" alt="Juggling"><br><sub>Juggles while subagents run</sub></td>
+    <td align="center"><img src="assets/demo/actions/notify.gif" width="132" alt="Notifying"><br><sub>Holds up a sign when Claude needs you</sub></td>
+    <td align="center"><img src="assets/demo/actions/sleep.gif" width="132" alt="Sleeping"><br><sub>Dozes off when you're away</sub></td>
+  </tr>
+</table>
 
-### 3. Mode-Dependent Laptop Put-Away & Cross-Screen Kick | 依模式分流的收筆電／踢飛大爆炸
-- **Standard / Quiet Mode (`標準／安靜模式`)**: Neatly closes the `\_` laptop lid, picks up the folded Ultrabook, tucks it back into its belly, and pats its stomach (`put_away_laptop`).
-- **Hyper Mode (`過動模式`)**: Winds up its front-left leg and **violently kicks the laptop all the way across your desktop into the left edge of your monitor (`x = 0`)**, triggering a **14-frame (1.75s) multi-stage pixel-art explosion** (electric short-circuit → 4-layer fireball & flying keycaps → chain-reaction cluster booms → billowing smoke plumes → 8-point anime golden star `★`)!
+- **Window-aware**: finds your Claude Desktop window, walks over, climbs its side and sits on the title bar. Drag the window and Clawd rides along; shake it and Clawd gets flung off; minimize it and Clawd falls.
+- **Works when Claude works**: while Claude is thinking (Claude Desktop I/O, Claude Code hooks or transcripts), Clawd pulls out a laptop and types in segments with breaks, then celebrates when the turn ends. In Hyper mode it kicks the laptop across the screen into an explosion.
+- **Reacts to you**: its eyes follow the cursor; it can be poked, petted, picked up and thrown; it naps after 90 s without input.
+- **Claude Code integration**: juggles while subagents run, molts on compaction, gets confused / sweaty / sad on tool failures, holds up a sign for plan reviews, questions and permission prompts, and leaves you a letter if a turn finishes while you're away.
+- **Customizable**: three activity modes, 1x / 2x / 3x scale, click-through lock, and a JSON behavior table for idle behavior.
 
-### 4. Native Win32 System Tray Control | 系統工作列圖示與穿透鎖定
-- Lives quietly in the Windows System Tray (`clawdlet.ico`) with a full right-click menu:
-  - **Summon to Center / Summon to Claude Window** (`一鍵召喚回畫面中央／Claude 視窗`): Summon to Center makes a fresh [entrance](#5-reacts-to-you--對你有反應v020--v030) (falling from the top or walking in from a side); Summon to Claude always drops onto Claude's title bar
-  - **Activity Modes**: `Quiet (安靜)` / `Normal (標準)` / `Hyper (過動)`
-  - **Pixel-Art Scaling**: `1x (64px)` / `2x (128px)` / `3x (192px)` anchored at feet level
-  - **Click-Through Lock (`WS_EX_TRANSPARENT`)**: 100% mouse click pass-through so it never blocks your workflow
-  - **Peek from Screen Edge / Allow Window Push / Copy Claude Code Hook Settings** (`邊緣躲藏／允許推視窗／複製 hook 設定`)
-  - **Mail When Away / Listen While Typing / Notify When Needed** (`離開時送信／打字時聆聽／需要我時通知`, all on by default; not remembered between runs — use `--no-mail` / `--no-listen` / `--no-notify` to start with them off)
-  - **Exit** (`結束`): Clawd waves goodbye first (at most 2 s; right away if it is in the air, held or climbing)
-  - **Reload Behaviors / Open Config Folder** (`重新載入行為設定／開啟設定資料夾`) for the [behavior config](#-behavior-config--行為設定檔)
-
-### 5. Reacts to You | 對你有反應（v0.2.0 · v0.3.0）
-- **Cursor awareness (`游標感知`)**: Clawd's eyes follow your cursor while it rests, it sometimes trots over to stand under the cursor, and in Hyper mode it **pounces** at a cursor that sits still above its head.
-- **Touch & combos (`觸摸與連擊`)**: single-click to **poke**, rub the mouse back and forth over it to **pet** it (hearts!), click 3+ times fast for a **tantrum**.
-- **Sleep schedule (`作息與睡眠`)**: after 90 s without keyboard/mouse input it yawns and dozes off (`Zzz`); touch anything and it jolts awake.
-- **Peek from screen edge (`邊緣躲藏`)**: a tray toggle that makes Clawd hide half-visible at the nearest screen edge and lean out to wave when your cursor comes close.
-- **Tiered idle (`分層閒置`, v0.3.0)**: the longer you're away, the more Clawd gets up to.
-  - **L1**: while resting it now and then glances left and right, blinks, or looks over at Claude's window (down at it when perched on it). Purely cosmetic. | 休息時偶爾左右張望、眨眼、看向 Claude 視窗（坐在上面時就往下看）。
-  - **L2** (no input for 45 s): it unrolls a **scroll** to read (often followed by **polishing a claw**), or **digs in the sand** on the floor. | 45 秒沒操作後：看卷軸（看完常接著擦爪子）、在地上挖沙。
-  - **L3** (90 s): yawn → sleep, as before — straight out of whatever L2 hobby it was on. | 90 秒：打哈欠 → 睡覺，L2 動作中也會直接睡著。
-- **Position-aware actions (`位置感知動作`, v0.3.0)**: at either end of Claude's title bar it may sit facing out with its **legs dangling** over the edge; with your cursor inside the window it may lean over and **peer down** at it; walking into a screen edge without climbing it, it sometimes **scratches the wall** before turning around; and arriving at the side of Claude's window it may **drum on it** before climbing up. | 在標題列兩端會面朝外坐著晃腳；游標在視窗內時會探頭往下看；撞到螢幕邊沒爬上去時會抓抓牆再轉身；走到 Claude 視窗側邊時可能先敲一敲再爬上去。
-- **Entrances (`登場`, v0.3.0)**: at startup (unless you pass `--spawn`) and on **Summon to Center**, Clawd arrives one of three ways, picked from the behavior config's `entrances` (eSheep-style spawn table): **drops onto Claude's title bar** (weight 5, only when the window is visible; never for Summon to Center), **falls from the top of the screen** at a random spot (3), or **walks in from a screen side** (2). With several monitors, a side that borders another monitor is skipped so Clawd never starts on the wrong screen. | 啟動時（沒指定 `--spawn`）與「召喚回畫面中央」時，從 `entrances` 抽一種登場：掉到 Claude 標題列上（看得到視窗才會抽到；召喚回中央不會）、從螢幕頂端隨機位置掉下、從螢幕側邊走進來（多螢幕時會避開和其他螢幕相鄰的那一側）。
-- **Goodbye (`道別`, v0.3.0)**: choosing **Exit** in the tray makes Clawd wave goodbye before the app closes (at most 2 s). `Ctrl+C` and `--duration` still exit at once. | Tray 的「結束」會先揮手道別（最多等 2 秒）；`Ctrl+C` 與 `--duration` 仍立即結束。
-- **Mail when you're away (`離開時送信`, v0.3.0)**: if a Claude Code turn finishes after you've been away for 30 s (`settings.mail_away_s`), Clawd skips the victory dance and keeps a **letter** for you instead. When you come back (it wakes up first if it dozed off), it carries the envelope over to your cursor and holds it up. **Click it** to take the letter: Clawd hands it over, **brings Claude Desktop to the front** so you can read the answer, and celebrates. If nobody takes it within 90 s, or that session gets busy again, the letter is dropped. Delivery takes priority over typing for other sessions (not over juggling). Turn it off in the tray or with `--no-mail`. | Claude Code 回合結束時你已離開 30 秒以上，Clawd 會先不慶祝、改存一封信；你回來後牠會帶著信封走到游標旁舉著，**點一下**收信，牠會把 Claude Desktop 拉到前景再慶祝。90 秒沒人收或同一個 session 又開始忙，信就作廢。
-- **Listening while you type (`打字時聆聽`, v0.3.0)**: while Claude Desktop is the active window and you're typing into it with the mouse at rest, Clawd tilts its head toward the window and listens, then goes back to what it was doing 1.5 s after you stop. **Privacy**: Clawdlet never reads which keys you press. It only notices that *some* input happened (the system-wide "last input" time from `GetLastInputInfo` resetting while the cursor stays still, which a click or the scroll wheel also does); there is no `GetAsyncKeyState`, no keyboard hook, and nothing is stored or logged. Turn it off in the tray or with `--no-listen`. | Claude Desktop 在前景、滑鼠不動而你在打字時，Clawd 會朝視窗歪頭聽，停手 1.5 秒後恢復。**隱私**：從不讀取按了哪些鍵，只知道「有輸入發生」（系統的最後輸入時間一再歸零而游標沒動；點擊或滾輪也會），不用 `GetAsyncKeyState`、不裝鍵盤 hook，也不保存或記錄任何東西。
-
-- **Notifications (`需要我時通知`)**: when Claude Code (in a terminal or Claude Desktop's Code tab) stops to wait for you, Clawd holds up a sign that says why — a **plan scroll** with ticks for a plan review (`ExitPlanMode`), a bouncing **`?`** for a question (`AskUserQuestion`, MCP elicitation), a golden **key** for a permission prompt. Unanswered after 10 s while Claude Desktop is in the background, Clawd **carries the sign over to your cursor** and keeps it there; **click Clawd** and Claude Desktop comes to the front. While Claude Desktop is the active window Clawd stays put. Without hooks, a tool call whose transcript has been quiet for 8 s gets only a soft **`…`** bubble (over the laptop while Clawd types, or where it stands) that never walks over and fades after 30 s — a long-running command can look the same. Several sessions waiting: permission > question > plan. Turn it off in the tray or with `--no-notify` (a hook's prompt then gets the plain `!` again). | Claude Code（終端機或 Claude Desktop 的 Code 分頁）停下來等你時，Clawd 會舉出對應的牌子：plan 審核舉**計畫卷軸**、發問頭上跳**「?」**、工具授權舉**金色鑰匙**。Claude Desktop 在背景且 10 秒沒反應，Clawd 會**拿著牌子走到游標旁**；**點一下 Clawd** 就把 Claude Desktop 拉到前景。Desktop 在前景時牠不會走過來。沒裝 hooks 時，工具呼叫的 transcript 安靜 8 秒只會出現淡色**「…」**泡泡（打字時疊在筆電上方），不走動、30 秒後消失；跑很久的指令也可能出現。多個 session 同時等待時：授權 > 發問 > plan。可在 Tray 或用 `--no-notify` 關閉（hooks 的提示會改回原本的「!」）。
-
-The tiered-idle and position-aware actions are rows in the [behavior config](#-behavior-config--行為設定檔) (`read_scroll`, `polish_claw`, `dig_sand`, `perch_dangle`, `perch_peer`, `edge_scratch`, `window_drum`, the `fidgets` list, and `settings.idle_level2_after_s` / `fidget_interval_s`), so you can tune their weights, chances, durations and cooldowns or switch them off; so are the entrances (`entrances`) and the mail delay (`settings.mail_away_s`). | 分層閒置與位置感知動作都是行為設定檔裡的列，權重、機率、時長、冷卻都能調，也能關掉；登場方式（`entrances`）與送信前的離開時間（`settings.mail_away_s`）也一樣。
-
-### 6. Claude Code Hooks | Claude Code 連動（v0.2.0 · v0.3.0）
-Clawdlet listens on `127.0.0.1:47821` for Claude Code [`http` hooks](https://code.claude.com/docs/en/hooks) and reacts to what your agent is doing:
-
-| Hook event | Clawdlet reaction | 反應 |
-| :--- | :--- | :--- |
-| `UserPromptSubmit` / `PreToolUse` / `PostToolUse` | Laptop out, typing in segments with breaks (stretch / think / coffee) | 掏筆電打字，段落間伸懶腰／托腮思考／喝咖啡 |
-| `SubagentStart` / `SubagentStop` | While subagents run, Clawd **juggles** them at the laptop, taking turns with typing (6–10 s each); back to typing when the last one stops | 有 subagent 時**拋球**，和打字輪流；最後一個結束就回去打字 |
-| `PreCompact` | **Molts**: sheds its shell and steps out of it; the empty husk lies there for a few seconds, then fades (hook-less sessions: the transcript's `compact_boundary`) | **蛻殼**：脫下舊殼走出來，空殼留幾秒後淡出 |
-| `Stop` | Laptop away (tuck or kick), then a **victory dance** — or, if you've been away, a [letter](#5-reacts-to-you--對你有反應v020--v030) to deliver when you're back | 收／踢筆電後慶祝；你不在時改成回來後送信 |
-| `PostToolUseFailure` | Escalates within 90 s: **confused** `?` → nervous **sweat** → **sad**; a finished turn starts over | 90 秒內連續失敗會升級：困惑 → 冒汗 → 沮喪；回合結束就歸零 |
-| `StopFailure` | **Sad** right away, no victory dance | 直接沮喪，不慶祝 |
-| `PreToolUse` for `ExitPlanMode` / `AskUserQuestion` | A [notification](#5-reacts-to-you--對你有反應v020--v030) sign: **plan scroll** / **`?`** | [通知](#5-reacts-to-you--對你有反應v020--v030)牌子：計畫卷軸／「?」 |
-| `Notification` `permission_prompt` / `elicitation_dialog` | The **key** / **`?`** sign; carried over to your cursor if unanswered | 鑰匙／「?」牌子；沒人理就拿到游標旁 |
-| `Notification` (anything else) | Bobbing golden **`!`** until you respond or click Clawd; still unanswered after 10 s, it **waves** both claws (knocks on the title bar when perched) for 2 s every 6 s | 頭上跳「!」；10 秒沒人理就揮手（在標題列上改成敲標題列），每 6 秒揮 2 秒 |
-
-`alert_escalate_s` and `work.juggle_segment_s` live in the [behavior config](#-behavior-config--行為設定檔)'s `settings`. | 揮手前的等待時間與拋球／打字輪替長度可在行為設定檔的 `settings` 調整。
-
-Three ways to connect | 三種連動方式（終端機與 Claude Desktop 的 Code 分頁都適用）:
-
-1. **Zero-config (default) | 零設定**: Clawdlet watches recently active Claude Code session transcripts (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR`) and reacts with typing and a victory dance. It only reads the structure of the records near the end of each file — record type / subtype (`api-request`, `tool_use`, `end_turn`, `compact_boundary`…), flags like `isMeta`, and whether a user record *starts with* one of Claude Code's own markers (`<command-name>`, `[Request interrupted by user`…) — never the conversation itself, which is neither stored nor logged. Slash commands don't count as work, pressing Esc puts the laptop away without a victory dance, and a tool call that stays silent for 25 s (most likely a permission prompt) stops the typing. For notifications it also reads the **name** of a pending `tool_use` (never its input) to spot a plan review or a question, and the top-level `entrypoint` to tell Claude Desktop sessions from terminal ones; a permission prompt can only be guessed (the 8 s `…` hint). It cannot show the `!` alert, and the transcript format is internal to Claude Code, so it is best-effort. Disable with `--no-transcript-watch`.
-   只讀紀錄的結構（type／subtype、`isMeta` 等旗標，以及使用者紀錄是否以 Claude Code 自己的標記開頭），不讀也不保存對話內容。為了通知，也會讀等待中 `tool_use` 的**工具名稱**（不讀輸入內容）來辨認 plan 審核與發問，並讀頂層的 `entrypoint` 分辨 Claude Desktop 與終端機；工具授權只能推測（8 秒的「…」）。slash 指令不算工作；按 Esc 中斷會收起筆電但不慶祝；工具呼叫 25 秒沒動靜（多半在等權限確認）就停止打字。
-2. **One-click install | 一鍵安裝（推薦）**: Tray menu → **安裝 Claude Code hooks (Install Hooks)** (asks for confirmation) or `clawdlet --install-hooks`. Clawdlet backs up `~/.claude/settings.json` to `settings.json.clawdlet-bak-<timestamp>`, adds only its own `http` entries pointing at `127.0.0.1`, and leaves everything else untouched. Remove them again from the same tray item or with `clawdlet --uninstall-hooks`.
-3. **Manual | 手動**: Tray menu → **複製 Claude Code hook 設定 (Copy Hook Settings)** or `clawdlet --print-hook-config`, then merge the `hooks` block yourself.
-
-**Updating | 更新 hooks**: newer Clawdlet versions listen to more hook events (`SubagentStop` and `PreCompact` were added for juggling and molting). If your `settings.json` has hooks from an older Clawdlet (or for another port / an old token), the tray shows **更新 Claude Code hooks (Update Hooks)** instead of the install item; choosing it (or running `clawdlet --install-hooks` again) replaces Clawdlet's own entries in place, with a backup, and keeps your other hooks — including your own `PreCompact` hooks. | 舊版 Clawdlet 裝的 hooks 少了 `SubagentStop`、`PreCompact`，Tray 會顯示「更新 Claude Code hooks (Update Hooks)」，點一下（或再跑一次 `clawdlet --install-hooks`）就會就地換掉 Clawdlet 自己的項目，先備份，其他 hooks 原封不動。
-
-When both hooks and the transcript watcher see the same session, hooks win, so a turn never celebrates twice. The exceptions: an Esc interrupt, which fires no hook and is always taken from the transcript; a plan review / question the transcript spots (in case no hook announced it); and, for Claude Desktop sessions, the transcript's `…` hint, because Desktop is assumed not to send `permission_prompt` notifications (not yet verified on a real Desktop install). | 同一個 session 以 hooks 為準；例外是 Esc 中斷（不會觸發 hook）、transcript 看到的 plan 審核／發問（以防沒有 hook 通知），以及 Claude Desktop session 的「…」提示（假設 Desktop 不送 `permission_prompt`，尚未在實機確認）。
-
-The receiver only binds to localhost, requires the bearer token (`%APPDATA%\Clawdlet\hook_token`), reads nothing but `hook_event_name`, `session_id`, the `notification_type` enum and `tool_name` (so `idle_prompt` / `auth_success` notifications don't raise a `!`, Clawd stops typing while a permission prompt waits for you, and `ExitPlanMode` / `AskUserQuestion` get their own sign; `tool_name` is only read from bodies up to 64 KB, never from `tool_input`), never logs payloads, and always answers with an empty `200` so it can never approve, deny, or block anything. `PermissionRequest` is intentionally left out of the generated settings. If Clawdlet isn't running, Claude Code just reports a non-blocking hook connection error.
+Full details: **[Features](docs/features.md)** · **[Claude Code hooks](docs/claude-code-hooks.md)** · **[Behavior config](docs/behavior-config.md)**
 
 ---
 
-## 🧩 Behavior Config | 行為設定檔
+## 🧠 Behavior Logic
 
-*New in v0.3.0.* What Clawd does when it is just hanging around comes from a JSON behavior table (in the spirit of Shimeji's `behaviors.xml`). The bundled `assets/behaviors/behaviors.default.json` reproduces the original idle choices exactly while you're around and adds the tiered-idle and position-aware rows; your own file **`%APPDATA%\Clawdlet\behaviors.json`** is merged on top of it. Engine-driven moves — being dragged, falling, reactions, typing, mail delivery, seeking Claude, wandering — stay in code; the table decides the idle choice after them (plus work breaks, fidgets and how Clawd makes its entrance).
-閒晃時要做什麼由 JSON 行為表決定。內建的 `behaviors.default.json` 在你活動時與原本的閒置選擇完全相同，另外加上分層閒置與位置感知的列；你的 **`%APPDATA%\Clawdlet\behaviors.json`** 會合併在它上面。拖曳、掉落、反應、打字、送信、找 Claude、閒逛等仍由程式決定，表格只決定之後的閒置動作（以及工作休息、小動作與登場方式）。
+Every frame (60 FPS) Clawd goes through the checks below, top first. Your own interactions (poke, pet, drag, rapid clicks) can cut in at any time.
 
-```json
-{
-  "$schema": "./behaviors.schema.json",
-  "version": 1,
-  "extends": "default",
-  "behaviors": [
-    { "id": "floor_blob", "enabled": false },
-    { "id": "perch_look_down", "weight": 0.5, "duration_s": [4, 8] }
-  ]
-}
+```mermaid
+flowchart TD
+    T(["Every frame"]) --> H{"Held by the mouse?"}
+    H -- yes --> DR["DRAGGED: struggles"]
+    DR -- released --> AIR
+    H -- no --> AIR{"In the air?"}
+    AIR -- yes --> FALL["FALLING / THROWN"]
+    FALL -- lands --> SQ["LAND_SQUISH<br/>(DIZZY after a hard landing)"]
+    SQ --> WHERE{"Landed on?"}
+    WHERE -- "Claude title bar" --> PERCH["PERCH_CLAUDE<br/>looks down · dangles legs · peers"]
+    WHERE -- floor --> REST
+    AIR -- no --> BUSY{"Claude working?<br/>hooks · transcript · Desktop I/O · double-click"}
+    BUSY -- yes --> WORK["TYPING in segments<br/>breaks: stretch · think · coffee<br/>subagents running: JUGGLE"]
+    WORK -- turn ends --> AWAY{"You away 30 s+?"}
+    AWAY -- yes --> MAIL["Keeps a letter, brings it<br/>to your cursor when you're back"]
+    AWAY -- no --> CELE["Puts away / kicks laptop<br/>then CELEBRATE"]
+    BUSY -- no --> WAIT{"Claude Code<br/>waiting for you?"}
+    WAIT -- yes --> NOTIFY["NOTIFY sign: plan · ? · key<br/>carried to your cursor after 10 s"]
+    WAIT -- no --> REST["Rest timer runs out"]
+    REST --> PICK{"Pick next"}
+    PICK --> SEEK["Walk to Claude's window<br/>CLIMB, perch on title bar"]
+    PICK --> WANDER["WANDER<br/>at a wall: climb · scratch · turn"]
+    PICK --> CHASE["Chase the cursor<br/>Hyper mode: pounce"]
+    PICK --> IDLE["Idle table (behaviors.json)<br/>45 s idle: read scroll · polish claw · dig sand<br/>90 s idle: yawn, sleep"]
 ```
 
-- **`extends: "default"`** (the default): a row with an existing `id` is patched field by field (a nested `when` / `next` / `weight` object is replaced as a whole), new ids are appended, and `settings` are deep-merged. **`extends: "none"`** replaces the bundled table. | 同 `id` 逐欄覆寫（巢狀的 `when` 整個取代）、新 `id` 附加；`none` 則整份取代。
-- **Rows | 欄位**: `state` (`IDLE`, `BLOB`, `PERCH_CLAUDE`, `READ_SCROLL`, `POLISH_CLAW`, `DIG_SAND`, `PERCH_DANGLE`, `PERCH_PEER`, `WALL_SCRATCH`), `on` (`rest`, or `wall_bump` / `window_side` for the scratching rows), `weight` (number or `{"quiet", "normal", "hyper"}`), optional `chance` (rolled on its own before the weighted pick), `when` (`surface`, `spot`, `mode`, idle level, `user_idle_s`, `claude_visible` / `claude_foreground`, `cursor_in_window`, `prev_state` / `not_prev_state`), `duration_s`, `scale_by_rest`, `cooldown_s`, `next` + `next_mode` (`add` / `replace`, up to 4 steps), `enabled`, `description`. `settings.work` sets the typing segment / break lengths, `settings.mail_away_s` how long you must be away before a finished turn becomes a letter.
-- **Entrances | 登場**: `entrances` rows have `kind` (`drop_on_claude`, `drop_top`, `walk_in_side`), `weight` and `when` (e.g. `claude_visible`); `{ "id": "walk_in_side", "enabled": false }` keeps Clawd from walking in. | `entrances` 決定登場方式與權重。
-- **Fidgets | 小動作**: `fidgets` rows play poses from the `gaze` strip over a resting Clawd every `settings.fidget_interval_s`: either `"poses": [[gaze_index, hold_s], ...]` (index `(dy+1)*3+(dx+1)`: 3 left, 4 ahead, 5 right, 7 down, 9 blink) or `"target": "claude_window"` with `hold_s`. | 每隔 `fidget_interval_s` 從 `gaze` 條帶播一段姿勢：`poses` 指定索引與停留秒數，或 `target: "claude_window"` 看向 Claude 視窗。
-- **Errors are forgiving | 容錯**: an invalid row is dropped with a warning naming it and the rest still load; a file that is not valid JSON or has the wrong `version` is ignored with one message (`[Clawdlet] behaviors.json: … — using defaults`).
-- **Tray | 系統匣**: **重新載入行為設定 (Reload Behaviors)** applies your edits without restarting; **開啟設定資料夾 (Open Config Folder)** creates an empty `behaviors.json` template (plus a copy of `behaviors.schema.json`) if missing and opens the folder.
-- **Autocompletion | 自動補完**: keep `"$schema": "./behaviors.schema.json"` and VS Code offers every key and value while you type.
-- **CLI**: `clawdlet --dump-behaviors` prints the merged table (what Clawd actually uses) and any warnings; `clawdlet --behaviors PATH` loads a different override file.
+When resting, the next step is decided in this order: notification > letter > celebration > work > peek from edge > window push > chase cursor > seek Claude > wander > idle table.
 
 ---
 
-## 🚀 Quick Start | 快速開始
+## 🚀 Quick Start
 
-### Requirements | 環境需求
-- **OS**: Windows 10 / 11 (64-bit, Per-Monitor DPI V2 supported)
-- **Python**: Python 3.11+
-
-### Installation & Run | 安裝與執行
+**Requirements**: Windows 10 / 11 (64-bit), Python 3.11+
 
 ```powershell
-# Clone repository
 git clone https://github.com/DreamOver9183/Clawdlet.git
 cd Clawdlet
-
-# Install in editable mode
 pip install -e .
-
-# Launch Clawdlet!
 python -m clawdlet
 ```
 
-### CLI Options | 命令列參數
+Clawd makes an entrance (drops onto Claude's title bar, falls from the top of the screen or walks in from a side) and an icon appears in the system tray.
+
+Optional: connect Claude Code so Clawd reacts to your agent. Watching session transcripts works out of the box; for full reactions install the hooks from the tray menu or with:
 
 ```powershell
-clawdlet --scale 2 --spawn above-claude    # Spawn above Claude Desktop at 2x (128x128) scale (default: a random entrance)
-clawdlet --spawn center                    # Spawn at the screen center instead of a random entrance
-clawdlet --mode hyper                      # Start directly in Hyper Mode (過動模式)
-clawdlet --click-through                   # Start with mouse click-through lock enabled
-clawdlet --debug                           # Show live state & HWND debug banner
-clawdlet --install-hooks                   # Add Clawdlet's hooks to ~/.claude/settings.json (with backup)
-clawdlet --uninstall-hooks                 # Remove them again (with backup)
-clawdlet --no-transcript-watch             # Don't watch Claude Code transcripts (zero-config fallback)
-clawdlet --print-hook-config               # Print the Claude Code hooks block for ~/.claude/settings.json
-clawdlet --hook-port 47821                 # Port for the Claude Code hook receiver (default 47821)
-clawdlet --no-hooks                        # Don't start the hook receiver
-clawdlet --allow-window-push               # Hyper mode may nudge the Claude window a few px (off by default)
-clawdlet --no-mail                         # Celebrate finished turns even when you're away (no letter)
-clawdlet --no-listen                       # Don't tilt the head toward Claude Desktop while you type
-clawdlet --no-notify                       # No signs for plan reviews / questions / permission prompts
-clawdlet --behaviors D:\my-behaviors.json  # Merge this behavior file instead of %APPDATA%\Clawdlet\behaviors.json
-clawdlet --dump-behaviors                  # Print the merged behavior table as JSON (warnings on stderr) and exit
-clawdlet-dump-windows                      # Diagnostic tool to inspect detected Claude.exe HWNDs
-python -m clawdlet.tools.send_hook_event Stop   # Dev: send a fake hook event to a running Clawdlet
-python -m clawdlet.tools.send_hook_event Notification --notification-type idle_prompt  # ...with a notification_type
-python -m clawdlet.tools.send_hook_event PreToolUse --tool-name ExitPlanMode  # ...with a tool_name (plan sign)
+clawdlet --install-hooks
 ```
 
-### Build Standalone `clawdlet.exe` | 打包單一執行檔
+<details>
+<summary>Build a standalone <code>clawdlet.exe</code></summary>
 
 ```powershell
 pip install pyinstaller
 python -m clawdlet.tools.build_exe
-# Output executable: dist/clawdlet.exe
+# Output: dist/clawdlet.exe
 ```
 
----
-
-## 🎮 Controls & Interactions | 互動操作一覽
-
-| Input | Action | 操作說明 |
-| :--- | :--- | :--- |
-| **Left-Click + Drag** | Pick up & throw | 左鍵按住並移動超過 4px 即拎起掙扎，甩動放開可依滑鼠軌跡拋飛（高速落地會眼冒金星暈眩） |
-| **Single Left-Click** | Poke | 單擊戳一下（睡著時會嚇醒；頭上有「!」時代表已讀；打字時只會抬頭看你一眼，然後繼續打字） |
-| **Double Left-Click** | Toggle Laptop Typing | 左鍵雙擊切換「掏筆電重摔打字」，再次雙擊（或 6 秒後）觸發收筆電／踢飛筆電。單擊／雙擊要等系統雙擊間隔（最多 0.5 秒）結束才判定 |
-| **3+ Rapid Clicks** | Tantrum | 連點三下以上會抓狂跺腳 |
-| **Rub Mouse Over Pet** | Pet | 不按鍵、滑鼠在身上左右來回摩擦就是撫摸，會冒愛心 |
-| **Move Cursor Nearby** | Gaze / Chase / Pounce | 眼睛追著游標看、偶爾走到游標下方；過動模式下游標停在頭上方會撲上去 |
-| **Right-Click on Pet** | Playful Hop | 右鍵點擊角色觸發原地開心跳躍 |
-| **Leave the PC (90 s)** | Sleep | 90 秒沒碰鍵盤滑鼠就打哈欠睡著，一動就驚醒 |
-| **Click the Envelope** | Take the letter | Claude Code 在你離開時做完，回來後 Clawd 會舉著信封站在游標旁；點一下收信，Claude Desktop 會跳到前景 |
-| **Type into Claude Desktop** | Listen | Claude Desktop 在前景、滑鼠不動時打字，Clawd 會朝視窗歪頭聽（不讀取按鍵） |
-| **Double-Click Tray Icon** | Summon to Center | 左鍵雙擊右下角系統匣圖示，立即重新登場（從螢幕頂端掉下或從側邊走進來） |
-| **Right-Click Tray Icon** | Open Control Menu | 右鍵點擊系統匣圖示，切換「安靜／標準／過動模式」、「1x/2x/3x 縮放」、「穿透鎖定」、「邊緣躲藏」、「允許推視窗」、「離開時送信」、「打字時聆聽」、「需要我時通知」、「複製 hook 設定」、「重新載入行為設定」與「開啟設定資料夾」 |
-| **Tray → Exit** | Wave Goodbye | 結束前先揮手道別（最多 2 秒） |
-
-**Allow Window Push (`允許推視窗`)** is off by default. When you turn it on, Hyper mode may — at most once every 15 minutes, only after you've been idle for 20 s, and never on a maximized window — walk up to the Claude window and shove it up to 36 px sideways (staying fully on screen). Any input stops it instantly.
+</details>
 
 ---
 
-## 🧪 Testing | 自動化測試
+## 🎮 Usage
+
+### Mouse
+
+| Input | Action |
+| :--- | :--- |
+| **Left-click + drag** | Pick up and throw (a fast landing makes it dizzy) |
+| **Single click** | Poke (wakes it up; acknowledges a `!`; while typing it only glances up) |
+| **Double click** | Toggle laptop typing |
+| **3+ rapid clicks** | Tantrum |
+| **Rub the mouse over it** | Pet (hearts) |
+| **Move the cursor nearby** | It watches, sometimes walks under the cursor; Hyper mode pounces |
+| **Right-click on Clawd** | Happy hop |
+| **Click the envelope** | Take the letter; Claude Desktop comes to the front |
+| **Click Clawd holding a sign** | Claude Desktop comes to the front |
+
+### System tray
+
+Double-click the tray icon to summon Clawd back. Right-click it for:
+
+- **Summon to Center** / **Summon to Claude**
+- **Coding / Typing Mode**: same as double-clicking Clawd
+- **Peek from Screen Edge**, **Allow Window Push** (Hyper)
+- **Mail When Away**, **Listen While Typing**, **Notify When Needed** (on by default)
+- **Install Hooks** (checked when installed; choose again to remove them; shows **Update Hooks** for an older install), **Copy Hook Settings**
+- **Reload Behaviors**, **Open Config Folder**
+- **Activity mode**: Quiet / Normal / Hyperactive
+- **Scale**: 1x (64 px) / 2x (128 px) / 3x (192 px)
+- **Click-through Lock**: mouse clicks pass through Clawd
+- **Debug HUD**
+- **Exit** (Clawd waves goodbye first)
+
+### Command line
 
 ```powershell
-pip install -e ".[dev]"
-python -m pytest -v
+clawdlet --scale 2 --spawn above-claude    # Spawn above Claude Desktop at 2x scale (default: a random entrance)
+clawdlet --spawn center                    # Spawn at the screen center
+clawdlet --mode hyper                      # Start in Hyper mode (quiet / normal / hyper)
+clawdlet --click-through                   # Start with click-through lock on
+clawdlet --debug                           # Show a live state & HWND debug banner
+clawdlet --install-hooks                   # Add Clawdlet's hooks to ~/.claude/settings.json (with backup)
+clawdlet --uninstall-hooks                 # Remove them again (with backup)
+clawdlet --print-hook-config               # Print the hooks block to merge by hand
+clawdlet --hook-port 47821                 # Port for the hook receiver (default 47821)
+clawdlet --no-hooks                        # Don't start the hook receiver
+clawdlet --no-transcript-watch             # Don't watch Claude Code transcripts
+clawdlet --allow-window-push               # Hyper mode may nudge the Claude window a few px
+clawdlet --no-mail                         # Celebrate finished turns even when you're away
+clawdlet --no-listen                       # Don't tilt the head toward Claude Desktop while you type
+clawdlet --no-notify                       # No signs for plan reviews / questions / permission prompts
+clawdlet --behaviors D:\my-behaviors.json  # Use this behavior override file
+clawdlet --dump-behaviors                  # Print the merged behavior table and exit
+clawdlet-dump-windows                      # Diagnose which Claude.exe windows are detected
 ```
 
-Some tests and behaviours need a real Windows desktop (Tk display, system tray, live Claude Desktop). Run through the **[Windows test checklist](docs/windows-test-checklist.md)** before a release. ｜ 部分測試與行為需要真的 Windows 桌面（Tk 顯示、系統匣、執行中的 Claude Desktop），發版前請照 **[Windows 實機測試清單](docs/windows-test-checklist.md)** 跑一遍。
+---
+
+## 📚 Documentation
+
+| Document | Contents |
+| :--- | :--- |
+| [Features](docs/features.md) | Every behavior in detail: window tracking, work sessions, reactions, idle levels, entrances, mail, listening, notifications |
+| [Claude Code hooks](docs/claude-code-hooks.md) | Hook events, the three ways to connect, privacy and security of the receiver |
+| [Behavior config](docs/behavior-config.md) | `behaviors.json` format for tuning or adding idle behavior |
+| [Development](docs/development.md) | Tests, building the exe, sprite and GIF generators, dev tools |
+| [Concept doc (中文)](docs/clawdlet.md) | Original design document, FSM and roadmap |
 
 ---
 
-## 🙏 Acknowledgements | 銘謝
+## 🙏 Acknowledgements
 
-Clawdlet's behaviour design was inspired by **Shimeji-ee**, **Microsoft Agent**, **oneko**, **eSheep**, **VPet**, **clawd-on-desk** and **Desktop Goose**, among others — design ideas only, no code or art was copied. See **[docs/ACKNOWLEDGEMENTS.md](docs/ACKNOWLEDGEMENTS.md)** for what came from where, and **[docs/plans/m6-plan.md](docs/plans/m6-plan.md)** for the M6 plan record. ｜ Clawdlet 的行為設計受到上述專案啟發（僅參考設計概念，未使用其程式碼或素材），詳見銘謝清單與 M6 計畫紀錄。
+Clawdlet's behavior design was inspired by **Shimeji-ee**, **Microsoft Agent**, **oneko**, **eSheep**, **VPet**, **clawd-on-desk** and **Desktop Goose**, among others. Only design ideas were borrowed; no code or art was copied. See **[docs/ACKNOWLEDGEMENTS.md](docs/ACKNOWLEDGEMENTS.md)** for what came from where.
 
 ---
 
-## ⚖️ Legal Disclaimer & Dual-Licensing | 免責聲明與雙重授權
+## ⚖️ Legal Disclaimer & Dual Licensing
 
-**Clawdlet** is an unofficial, non-commercial, fan-made open-source project.  
+**Clawdlet** is an unofficial, non-commercial, fan-made open-source project.
 It is **NOT** affiliated with, endorsed by, or sponsored by Anthropic, PBC.
 
 The "Claude" name, brand, and the original "Clawd" character concept are the intellectual property of Anthropic, PBC.
-- **Source Code ([`LICENSE`](LICENSE))**: Licensed under the **MIT License**.
-- **Sprite & Art Assets ([`assets/LICENSE.md`](assets/LICENSE.md))**: Explicitly excluded from the MIT License. All fan-made pixel-art assets in `assets/` are provided strictly for personal, non-commercial entertainment and educational use. Commercial redistribution, merchandise, or crypto/NFT usage is strictly prohibited.
+
+- **Source code ([`LICENSE`](LICENSE))**: MIT License.
+- **Sprite & art assets ([`assets/LICENSE.md`](assets/LICENSE.md))**: excluded from the MIT License. The fan-made pixel art in `assets/` is for personal, non-commercial entertainment and educational use only. Commercial redistribution, merchandise, and crypto/NFT use are prohibited.

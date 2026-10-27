@@ -157,11 +157,98 @@ def generate_demo_scene_gif(output_path: Path, bank: SpriteSheetBank) -> Path:
     return output_path
 
 
+# Small per-action GIFs for the README introduction (one card per basic action)
+ACTION_CARD_SIZE = 176
+ACTION_FLOOR_Y = ACTION_CARD_SIZE - 14
+ACTION_DT = 0.1  # 10 FPS
+
+# A step is (animation, seconds, (dx, dy) offset at the start, (dx, dy) offset at the end)
+ActionStep = tuple[str, float, tuple[float, float], tuple[float, float]]
+
+ACTION_GIFS: dict[str, list[ActionStep]] = {
+    "walk.gif": [("walk_horizontal", 2.0, (0, 0), (0, 0))],
+    "climb.gif": [
+        ("climb_vertical", 2.4, (-28, 0), (-28, -90)),
+        ("walk_horizontal", 0.6, (-28, -90), (24, -90)),
+        ("perch_look_down", 1.2, (24, -90), (24, -90)),
+    ],
+    "typing.gif": [("typing_laptop", 4.6, (0, 0), (0, 0))],
+    "thrown.gif": [
+        ("dragged_struggle", 1.0, (0, -64), (0, -64)),
+        ("free_fall", 0.4, (0, -64), (0, 0)),
+        ("land_squish", 0.4, (0, 0), (0, 0)),
+        ("dizzy", 1.6, (0, 0), (0, 0)),
+    ],
+    "petted.gif": [("petted", 2.6, (0, 0), (0, 0))],
+    "juggle.gif": [("juggle", 2.0, (0, 0), (0, 0))],
+    "notify.gif": [
+        ("notify_plan", 1.6, (0, 0), (0, 0)),
+        ("notify_question", 1.6, (0, 0), (0, 0)),
+        ("notify_permission", 1.6, (0, 0), (0, 0)),
+    ],
+    "sleep.gif": [("sleep", 2.7, (0, 0), (0, 0))],
+}
+
+
+def _draw_action_backdrop(draw: ImageDraw.ImageDraw, name: str) -> None:
+    size = ACTION_CARD_SIZE
+    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=14, fill=(18, 20, 28, 255))
+    for gx in range(16, size, 32):
+        for gy in range(16, ACTION_FLOOR_Y - 8, 32):
+            draw.point((gx, gy), fill=(36, 40, 54, 255))
+    if name == "climb.gif":
+        # Corner of a mock Claude Desktop window to climb up and perch on
+        left, top = 96, ACTION_FLOOR_Y - 90
+        draw.rectangle((left, top, size - 1, ACTION_FLOOR_Y), fill=(30, 29, 27, 255))
+        draw.rectangle((left, top, size - 1, top + 12), fill=(40, 38, 35, 255))
+        draw.rectangle((left, top, left + 1, ACTION_FLOOR_Y), fill=(68, 65, 60, 255))
+        draw.rectangle((left, top, size - 1, top + 1), fill=(68, 65, 60, 255))
+    draw.rectangle((10, ACTION_FLOOR_Y, size - 11, ACTION_FLOOR_Y + 1), fill=(48, 54, 74, 255))
+
+
+def generate_action_gif(output_path: Path, bank: SpriteSheetBank, steps: list[ActionStep]) -> Path:
+    """Create a small looping card GIF that plays ``steps`` back to back, standing on a floor line."""
+    frames: list[Image.Image] = []
+    base_x = (ACTION_CARD_SIZE - bank.scaled_width) / 2
+    base_y = ACTION_FLOOR_Y - bank.scaled_height
+    for anim_name, seconds, start, end in steps:
+        count = max(1, round(seconds / ACTION_DT))
+        for i in range(count):
+            p = i / max(1, count - 1)
+            dx = start[0] + (end[0] - start[0]) * p
+            dy = start[1] + (end[1] - start[1]) * p
+            canvas = Image.new("RGBA", (ACTION_CARD_SIZE, ACTION_CARD_SIZE), (0, 0, 0, 0))
+            _draw_action_backdrop(ImageDraw.Draw(canvas), output_path.name)
+            sprite = bank.get_frame(anim_name, i * ACTION_DT).image
+            _paste_rgba(canvas, sprite, base_x + dx, base_y + dy)
+            frames.append(canvas)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Corners outside the rounded card stay transparent so the card sits on any README theme
+    paletted = [f.convert("RGB").quantize(colors=255, dither=Image.Dither.NONE) for f in frames]
+    for src, pal in zip(frames, paletted):
+        pal.paste(255, mask=src.getchannel("A").point(lambda a: 255 if a < 128 else 0))
+    paletted[0].save(
+        output_path,
+        format="GIF",
+        save_all=True,
+        append_images=paletted[1:],
+        duration=int(ACTION_DT * 1000),
+        loop=0,
+        transparency=255,
+        disposal=2,
+    )
+    return output_path
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[3]
     bank = SpriteSheetBank(scale=2)
     out = generate_demo_scene_gif(repo_root / "assets" / "demo" / "clawdlet_demo.gif", bank)
     print(f"Generated showcase GIF at: {out}")
+    for name, steps in ACTION_GIFS.items():
+        out = generate_action_gif(repo_root / "assets" / "demo" / "actions" / name, bank, steps)
+        print(f"Generated action GIF at: {out}")
     return 0
 
 
